@@ -110,11 +110,14 @@ class ArbitrageOpportunity:
     outcomes: List[OutcomePrice]
     sum_prices: float  # Sum of YES prices across outcomes
     profit_per_share: float  # 1.0 - sum_prices (before fees)
-    net_profit_per_share: float  # After accounting for 1.5% fee × num_outcomes
+    net_profit_per_share: float  # After accounting for dynamic fees
     required_budget: float  # Cost per share × desired shares
     max_shares_to_buy: float  # Limited by order book depth
     is_negrisk: bool = False
     negrisk_short_field_cost: Optional[float] = None
+    # Dynamic fee rates (2026 update)
+    fee_rates_bps: Optional[Dict[str, int]] = None  # token_id -> fee in basis points
+    total_fee_amount: float = 0.0  # Total fee in dollars
 
 
 @dataclass
@@ -337,10 +340,34 @@ class ArbScanner:
             # Calculate profit
             profit_per_share = 1.0 - norm_entry_cost
             
-            # Account for taker fees (1.5% per trade × num_outcomes)
-            num_trades = len(outcomes)
-            total_fee_percent = TAKER_FEE_PERCENT * num_trades
-            net_profit_per_share = profit_per_share - (norm_entry_cost * total_fee_percent)
+            # 2026 UPDATE: Fetch dynamic fee rates for each token
+            fee_rates_bps = {}
+            total_fee_percent = 0.0
+            
+            try:
+                for outcome in outcome_prices:
+                    fee_bps = await self.client.get_fee_rate_bps(outcome.token_id)
+                    fee_rates_bps[outcome.token_id] = fee_bps
+                    # Convert basis points to decimal (100 bps = 1%)
+                    total_fee_percent += (fee_bps / 10000.0)
+                
+                logger.debug(
+                    f"Market {market_id}: Dynamic fees fetched - "
+                    f"Total: {total_fee_percent*100:.2f}% across {len(outcomes)} outcomes"
+                )
+            except Exception as e:
+                # Fallback to static 1.5% per trade if dynamic fetch fails
+                logger.warning(
+                    f"Failed to fetch dynamic fees for {market_id}, "
+                    f"using fallback {TAKER_FEE_PERCENT*100}% per trade: {e}"
+                )
+                total_fee_percent = TAKER_FEE_PERCENT * len(outcomes)
+                fee_rates_bps = None
+            
+            # Net profit = Gross profit - Total fees
+            # Formula: (1.0 - sum_prices) - (entry_cost × total_fee_percent)
+            total_fee_amount = norm_entry_cost * total_fee_percent
+            net_profit_per_share = profit_per_share - total_fee_amount
             
             # Only report if profit exceeds threshold
             if net_profit_per_share < MINIMUM_PROFIT_THRESHOLD:
@@ -372,7 +399,9 @@ class ArbScanner:
                 required_budget=required_budget,
                 max_shares_to_buy=max_shares,
                 is_negrisk=is_negrisk,
-                negrisk_short_field_cost=1.0 - sum_prices if is_negrisk else None
+                negrisk_short_field_cost=1.0 - sum_prices if is_negrisk else None,
+                fee_rates_bps=fee_rates_bps,
+                total_fee_amount=total_fee_amount
             )
             
         except Exception as e:
