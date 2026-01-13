@@ -15,7 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
+from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor
 from strategies.mirror_strategy import MirrorStrategy
+from strategies.arbitrage_strategy import ArbitrageStrategy
 from config.constants import (
     LOOP_INTERVAL_SEC,
     HEALTH_CHECK_INTERVAL_SEC,
@@ -52,6 +54,7 @@ class PolymarketBot:
         """
         self.client: Optional[PolymarketClient] = None
         self.order_manager: Optional[OrderManager] = None
+        self.atomic_executor: Optional[AtomicDepthAwareExecutor] = None
         self.strategies = []
         self.is_running = False
         self.consecutive_errors = 0
@@ -85,9 +88,21 @@ class PolymarketBot:
             # Initialize order manager
             self.order_manager = OrderManager(self.client)
             
+            # Initialize atomic executor for depth-aware arbitrage execution
+            self.atomic_executor = AtomicDepthAwareExecutor(self.client, self.order_manager)
+            logger.info("AtomicDepthAwareExecutor initialized")
+            
             # Initialize strategies
             mirror_strategy = MirrorStrategy(self.client, self.order_manager)
             self.strategies.append(mirror_strategy)
+            
+            # Initialize arbitrage strategy with atomic executor
+            arb_strategy = ArbitrageStrategy(
+                self.client,
+                self.order_manager,
+                atomic_executor=self.atomic_executor
+            )
+            self.strategies.append(arb_strategy)
             
             logger.info(f"Bot initialized with {len(self.strategies)} strategies")
             

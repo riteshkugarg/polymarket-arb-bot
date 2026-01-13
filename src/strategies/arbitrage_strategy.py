@@ -49,6 +49,7 @@ from strategies.base_strategy import BaseStrategy
 from strategies.arb_scanner import ArbScanner, AtomicExecutor, ArbitrageOpportunity
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
+from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor, ExecutionPhase
 from config.constants import (
     PROXY_WALLET_ADDRESS,
     API_TIMEOUT_SEC,
@@ -84,7 +85,8 @@ class ArbitrageStrategy(BaseStrategy):
         self,
         client: PolymarketClient,
         order_manager: OrderManager,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        atomic_executor: Optional[AtomicDepthAwareExecutor] = None
     ):
         """
         Initialize arbitrage strategy
@@ -93,11 +95,14 @@ class ArbitrageStrategy(BaseStrategy):
             client: Polymarket CLOB client
             order_manager: Order execution manager
             config: Optional configuration overrides
+            atomic_executor: Optional AtomicDepthAwareExecutor for depth-aware execution
         """
         super().__init__(client, order_manager, config)
         
         self.scanner = ArbScanner(client, order_manager)
         self.executor = AtomicExecutor(client, order_manager)
+        self.atomic_executor = atomic_executor or AtomicDepthAwareExecutor(client, order_manager)
+        self.use_depth_aware_executor = atomic_executor is not None
         
         # Strategy state
         self._is_running = False
@@ -198,7 +203,7 @@ class ArbitrageStrategy(BaseStrategy):
                 )
                 return
             
-            # Execute with optimal share count
+            # Calculate share count
             shares_to_buy = min(
                 top_opportunity.max_shares_to_buy,
                 top_opportunity.required_budget / top_opportunity.sum_prices
@@ -208,8 +213,13 @@ class ArbitrageStrategy(BaseStrategy):
                 logger.debug(f"Share count too low: {shares_to_buy} < 1.0")
                 return
             
-            # Execute
-            result = await self.executor.execute(top_opportunity, shares_to_buy)
+            # Execute using atomic depth-aware executor if available
+            if self.use_depth_aware_executor:
+                logger.debug("Using AtomicDepthAwareExecutor for execution...")
+                result = await self._execute_atomic_depth_aware(top_opportunity, shares_to_buy)
+            else:
+                logger.debug("Using standard AtomicExecutor for execution...")
+                result = await self.executor.execute(top_opportunity, shares_to_buy)
             
             # Update metrics
             self._total_arb_executions += 1
@@ -257,6 +267,81 @@ class ArbitrageStrategy(BaseStrategy):
         except Exception as e:
             logger.error(f"Error in arb scan loop: {e}")
             self._consecutive_failures += 1
+
+    async def _execute_atomic_depth_aware(
+        self,
+        opportunity: ArbitrageOpportunity,
+        shares_to_buy: float
+    ) -> Any:
+        """
+        Execute using AtomicDepthAwareExecutor with depth validation
+        
+        Args:
+            opportunity: ArbitrageOpportunity detected by scanner
+            shares_to_buy: Number of shares to buy per outcome
+            
+        Returns:
+            Execution result object (converted from atomic executor format)
+        """
+        try:
+            # Build outcome list for atomic executor
+            outcomes = [
+                (op.token_id, op.outcome_name, op.ask_price)
+                for op in opportunity.outcomes
+            ]
+            
+            logger.debug(
+                f"Atomic execution: Market {opportunity.market_id[:8]}..., "
+                f"Shares: {shares_to_buy}, Outcomes: {len(outcomes)}"
+            )
+            
+            # Execute atomically with depth awareness
+            result = await self.atomic_executor.execute_atomic_basket(
+                market_id=opportunity.market_id,
+                outcomes=outcomes,
+                side="BUY",
+                size=shares_to_buy,
+                order_type="FOK"  # Fill-or-Kill for safety
+            )
+            
+            # Convert atomic executor result to format compatible with existing code
+            from strategies.arb_scanner import ExecutionResult
+            
+            if result.success:
+                profit = opportunity.net_profit_per_share * result.filled_shares
+                return ExecutionResult(
+                    success=True,
+                    market_id=opportunity.market_id,
+                    total_cost=float(result.total_cost),
+                    shares_filled=result.filled_shares,
+                    actual_profit=profit,
+                    error_message=""
+                )
+            else:
+                # Log failure details
+                error_msg = f"Atomic execution failed at phase {result.execution_phase.value}"
+                if result.partial_fills:
+                    error_msg += f" (PARTIAL FILLS: {result.partial_fills})"
+                
+                return ExecutionResult(
+                    success=False,
+                    market_id=opportunity.market_id,
+                    total_cost=0,
+                    shares_filled=0,
+                    actual_profit=0,
+                    error_message=error_msg
+                )
+                
+        except Exception as e:
+            logger.error(f"Atomic depth-aware execution error: {e}")
+            return ExecutionResult(
+                success=False,
+                market_id=opportunity.market_id,
+                total_cost=0,
+                shares_filled=0,
+                actual_profit=0,
+                error_message=str(e)
+            )
 
     def _is_opportunity_executable(self, opportunity: ArbitrageOpportunity) -> bool:
         """

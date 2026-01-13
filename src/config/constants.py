@@ -378,6 +378,48 @@ ARBITRAGE_STRATEGY_CONFIG = {
 
 
 # ============================================================================
+# ATOMIC EXECUTION PARAMETERS (Zero Legging-In Risk)
+# ============================================================================
+# Configuration for AtomicDepthAwareExecutor - prevents partial fills and
+# ensures all legs execute atomically or not at all
+
+# Minimum liquidity depth required per outcome before execution (in shares)
+# Ensures sufficient market depth exists for atomic execution
+# Higher values = safer but fewer opportunities
+ATOMIC_MIN_DEPTH_SHARES: Final[float] = 10.0
+
+# Number of price levels (pips) to check in order book depth
+# Checks top N levels of the order book for available liquidity
+# Must have MIN_DEPTH_SHARES within TOP_PIPS_DEPTH levels
+ATOMIC_TOP_PIPS_DEPTH: Final[int] = 3
+
+# Order fill timeout in seconds
+# Maximum time to wait for all orders to fill completely
+# If exceeded, cancels all pending orders
+ATOMIC_ORDER_TIMEOUT_SEC: Final[int] = 5
+
+# Order status check interval in milliseconds
+# Frequency of polling order status during fill monitoring
+# Lower = faster detection of partial fills, higher API usage
+ATOMIC_CHECK_INTERVAL_MS: Final[int] = 100
+
+# Maximum price slippage tolerance per outcome (in dollars)
+# Prevents execution if market moves unfavorably during placement
+ATOMIC_MAX_SLIPPAGE_USD: Final[float] = 0.005
+
+# Cooldown period after execution failure (in seconds)
+# Prevents rapid retries after CRITICAL failures (partial fills, errors)
+ATOMIC_FAILURE_COOLDOWN_SEC: Final[int] = 30
+
+# Maximum consecutive failures before circuit breaker activation
+# Bot pauses atomic execution after this many consecutive failures
+ATOMIC_MAX_CONSECUTIVE_FAILURES: Final[int] = 3
+
+# Circuit breaker cooldown duration (in seconds)
+# How long to pause execution after circuit breaker triggers
+ATOMIC_CIRCUIT_BREAKER_COOLDOWN_SEC: Final[int] = 300  # 5 minutes
+
+# ============================================================================
 # AWS CONFIGURATION (loaded from environment)
 # ============================================================================
 
