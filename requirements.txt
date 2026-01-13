@@ -1,5 +1,5 @@
-# Core Dependencies
-py-clob-client==0.23.0  # Polymarket CLOB client
+# Core Dependencies (2026 Update)
+py-clob-client>=0.25.0  # Polymarket CLOB client (2026 NegRisk + dynamic fees support)
 web3>=6.20.0  # Ethereum interaction (updated for compatibility with eth-account>=0.13.0)
 eth-account>=0.13.0  # Ethereum account management (required by py-clob-client)
 

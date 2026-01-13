@@ -36,6 +36,9 @@ from config.constants import (
     ATOMIC_ORDER_TIMEOUT_SEC,
     ATOMIC_CHECK_INTERVAL_MS,
     ATOMIC_MAX_SLIPPAGE_USD,
+    MAX_BALANCE_UTILIZATION_PERCENT,
+    FOK_FILL_FAILURE_COOLDOWN_SEC,
+    ENABLE_NEGRISK_AUTO_DETECTION,
 )
 from utils.logger import get_logger
 from utils.exceptions import (
@@ -130,7 +133,8 @@ class AtomicDepthAwareExecutor:
         outcomes: List[Tuple[str, str, float]],  # (token_id, outcome_name, ask_price)
         side: str,
         size: float,
-        order_type: str = "FOK"
+        order_type: str = "FOK",
+        is_negrisk: bool = False  # 2026 Update: NegRisk flag
     ) -> AtomicExecutionResult:
         """
         Execute atomic arbitrage basket with depth awareness
@@ -188,9 +192,13 @@ class AtomicDepthAwareExecutor:
             
             logger.debug(f"[{market_id}] ✅ Depth validation passed for all {len(outcomes)} outcomes")
             
-            # 1b. Balance validation
+            # 1b. Balance validation (2026 Update: 90% max utilization guard)
             total_cost = Decimal(str(sum(price for _, _, price in outcomes))) * Decimal(str(size))
             balance = await self.client.get_balance()
+            
+            # Calculate maximum allowed commitment (90% of balance)
+            max_allowed_cost = balance * MAX_BALANCE_UTILIZATION_PERCENT
+            
             if balance < float(total_cost):
                 result.execution_phase = ExecutionPhase.PRE_FLIGHT
                 result.error_message = (
@@ -199,8 +207,22 @@ class AtomicDepthAwareExecutor:
                 logger.warning(f"[{market_id}] Balance check failed: {result.error_message}")
                 return result
             
+            if float(total_cost) > max_allowed_cost:
+                result.execution_phase = ExecutionPhase.PRE_FLIGHT
+                result.error_message = (
+                    f"Cost exceeds 90% balance limit: "
+                    f"${float(total_cost):.2f} > ${max_allowed_cost:.2f} "
+                    f"(balance: ${balance:.2f})"
+                )
+                logger.warning(f"[{market_id}] Balance guard triggered: {result.error_message}")
+                return result
+            
             result.total_cost = total_cost
-            logger.debug(f"[{market_id}] ✅ Balance validation passed: ${float(balance):.2f} available")
+            logger.debug(
+                f"[{market_id}] ✅ Balance validation passed: "
+                f"${float(balance):.2f} available, "
+                f"using ${float(total_cost):.2f} ({float(total_cost)/balance*100:.1f}%)"
+            )
             
             # ════════════════════════════════════════════════════════════════
             # PHASE 2: BUILD ORDER TASKS

@@ -2056,7 +2056,8 @@ class PolymarketClient:
     async def create_market_buy_order(
         self,
         token_id: str,
-        amount: float
+        amount: float,
+        neg_risk: bool = False  # 2026 Update: NegRisk signature flag
     ) -> Dict[str, Any]:
         """
         Create and execute a market buy order (single-step)
@@ -2064,6 +2065,7 @@ class PolymarketClient:
         Args:
             token_id: Token to buy
             amount: Amount in USDC to spend
+            neg_risk: If True, include NegRisk signature (2026 requirement)
             
         Returns:
             Order response with execution details
@@ -2130,7 +2132,8 @@ class PolymarketClient:
         self,
         token_id: str,
         amount: float,
-        estimated_value: Optional[float] = None
+        estimated_value: Optional[float] = None,
+        neg_risk: bool = False  # 2026 Update: NegRisk signature flag
     ) -> Dict[str, Any]:
         """
         Create and execute a market sell order (single-step)
@@ -2139,6 +2142,7 @@ class PolymarketClient:
             token_id: Token to sell
             amount: Amount of shares to sell
             estimated_value: Estimated USD value (for logging small orders)
+            neg_risk: If True, include NegRisk signature (2026 requirement)
             
         Returns:
             Order response with execution details

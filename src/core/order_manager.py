@@ -143,7 +143,8 @@ class OrderManager:
         side: str,
         size: float,
         max_slippage: Optional[float] = None,
-        is_shares: bool = False
+        is_shares: bool = False,
+        neg_risk: bool = False  # 2026 Update: NegRisk flag for proper signature
     ) -> Dict[str, Any]:
         """
         Execute a market order with slippage protection
@@ -154,6 +155,7 @@ class OrderManager:
             size: Order size in USDC (or shares if is_shares=True for SELL orders)
             max_slippage: Maximum allowed slippage (uses default if not specified)
             is_shares: If True, size represents shares for SELL orders (default: False)
+            neg_risk: If True, market is NegRisk and requires special signature (2026)
             
         Returns:
             Order execution result

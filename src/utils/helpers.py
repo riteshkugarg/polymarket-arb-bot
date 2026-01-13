@@ -520,3 +520,23 @@ def rate_limit(calls_per_second: float):
 
         return wrapper
     return decorator
+
+
+def is_dust_amount(amount_usd: float, threshold: float = 0.01) -> bool:
+    """
+    Check if an amount is too small to be worth trading (dust).
+    
+    Args:
+        amount_usd: Amount in USD
+        threshold: Minimum amount threshold (default: $0.01)
+        
+    Returns:
+        True if amount is dust (below threshold), False otherwise
+        
+    Example:
+        >>> is_dust_amount(0.005)  # Too small
+        True
+        >>> is_dust_amount(1.50)  # Worth trading
+        False
+    """
+    return abs(amount_usd) < threshold

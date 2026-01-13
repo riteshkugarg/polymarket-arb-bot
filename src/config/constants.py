@@ -12,7 +12,7 @@ Key Principles:
 - Type hints for IDE support and runtime safety
 """
 
-from typing import Final
+from typing import Final, Dict
 import os
 
 
@@ -42,28 +42,7 @@ PROXY_WALLET_ADDRESS: Final[str] = os.getenv(
 
 
 # ============================================================================
-# 2. MIRROR STRATEGY CONFIGURATION
-# ============================================================================
-# Configuration for mirroring trades from target whale wallets
-
-# Target whale wallet to mirror (proxy address)
-# ACTION: Change this to the whale wallet you want to mirror
-MIRROR_TARGET: Final[str] = os.getenv(
-    'MIRROR_TARGET_WALLET',
-    '0x63ce342161250d705dc0b16df89036c8e5f9ba9a'
-)
-
-# Enable WebSocket-based detection (True) vs polling (False)
-# WebSocket: Lower latency, fewer API calls, better for latency-sensitive trading
-# Polling: Simpler implementation, suitable for lower-frequency strategies
-USE_WEBSOCKET_DETECTION: Final[bool] = os.getenv(
-    'USE_WEBSOCKET_DETECTION',
-    'false'
-).lower() == 'true'
-
-
-# ============================================================================
-# TRADING PARAMETERS
+# 2. TRADING PARAMETERS
 # ============================================================================
 
 # Only buy if price is within 0.05% of whale's price
@@ -270,108 +249,12 @@ CIRCUIT_BREAKER_LOSS_THRESHOLD_USD: Final[float] = 25.0
 
 
 # ============================================================================
-# STRATEGY-SPECIFIC CONFIGURATION - MIRROR STRATEGY
-# ============================================================================
-# The Mirror Strategy runs 3 parallel flows:
-# 1. Trade Mirroring: Copy whale's buy/sell trades (frequent - every 2-5 sec)
-# 2. Position Alignment: Sell positions whale has closed (less frequent - every 60 sec)
-# 3. Position Redemption: Redeem closed positions for profit (less frequent - every 60 sec)
+# STRATEGY-SPECIFIC CONFIGURATION - ARBITRAGE STRATEGY
 # ============================================================================
 
-# ─────────────────────────────────────────────────────────────────────────
-# FLOW 1: TRADE MIRRORING CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────
-# Copy whale's recent trades (both buy and sell orders) with safety checks
-# Runs frequently to catch market opportunities quickly
-
-MIRROR_TRADE_POLLING_INTERVAL_SEC: Final[int] = 2  # Check whale's recent trades every 2 seconds
-MIRROR_TRADE_TIME_WINDOW_MINUTES: Final[int] = 10  # Only mirror trades from last 10 minutes
-MIRROR_ENTRY_DELAY_SEC: Final[float] = 0  # Delay between executing multiple trades (0 = immediate)
-
-# Order sizing for mirrored trades
-MIRROR_USE_PROPORTIONAL_SIZE: Final[bool] = False  # True = size * ratio, False = fixed size
-MIRROR_POSITION_SIZE_MULTIPLIER: Final[float] = 1.0  # Follow whale's position size exactly (if proportional)
-MIRROR_ORDER_SIZE_RATIO: Final[float] = 0.05  # If proportional: trade 5% of whale's order size
-MIRROR_MAX_ORDER_SIZE_USD: Final[float] = 1.0  # Maximum order size cap ($1 = conservative)
-MIRROR_MIN_ORDER_SIZE_USD: Final[float] = 0.01  # Minimum order size in USD (reject below this)
-
-# Order execution strategy
-MIRROR_USE_MARKET_ORDERS: Final[bool] = False  # False = limit orders, True = market orders
-MIRROR_LIMIT_ORDER_PRICE_BUFFER_PERCENT: Final[float] = 4.0  # 4% buffer for limit order pricing
-MIRROR_MARKET_ORDER_MAX_PRICE_DEVIATION_PERCENT: Final[float] = 50.0  # Max allowed slippage
-
-# Balance caching to reduce API calls
-MIRROR_BALANCE_CACHE_SECONDS: Final[int] = 30  # Cache balance for 30 seconds
-
-# ─────────────────────────────────────────────────────────────────────────
-# FLOW 2: POSITION ALIGNMENT CONFIGURATION  
-# ─────────────────────────────────────────────────────────────────────────
-# Detect whale exits and immediately sell matching positions we hold
-# Ensures we don't hold positions whale has already closed (exit following)
-# Runs less frequently (every 60 seconds) since whale exits are less common
-
-MIRROR_POSITION_ALIGNMENT_INTERVAL_SEC: Final[int] = 60  # Check for whale exits every 60 seconds
-MIRROR_CLOSED_POSITIONS_LOOK_BACK_LIMIT: Final[int] = 10  # Check whale's last 10 closed positions
-MIRROR_SELL_IMMEDIATELY_ON_WHALE_EXIT: Final[bool] = True  # True = sell immediately when whale exits
-MIRROR_SELL_ORDER_TYPE: Final[str] = 'LIMIT'  # LIMIT or MARKET (for selling positions)
-MIRROR_SELL_PRICE_BUFFER_PERCENT: Final[float] = 2.0  # 2% buffer for sell limit orders (more aggressive)
-
-# ─────────────────────────────────────────────────────────────────────────
-# FLOW 3: POSITION REDEMPTION CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────
-# Redeem closed/resolved positions to collect profits
-# Runs less frequently (every 60 seconds) since resolution is rare
-# 
-# On Polymarket, when a market resolves:
-# 1. Winning shares can be redeemed for $1 USDC each
-# 2. Losing shares become worthless
-# This flow detects resolved markets and redeems winning positions
-
-MIRROR_POSITION_REDEMPTION_INTERVAL_SEC: Final[int] = 60  # Check for redeemable positions every 60 seconds
-MIRROR_AUTO_REDEEM_CLOSED_POSITIONS: Final[bool] = True  # Automatically redeem winning positions
-MIRROR_BATCH_REDEEM_SIZE: Final[int] = 5  # Redeem max 5 positions per cycle
-
-# ─────────────────────────────────────────────────────────────────────────
-# MIRROR STRATEGY OVERALL CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────
-
-MIRROR_STRATEGY_CONFIG = {
-    # Overall enabled/disabled
-    'enabled': True,
-    
-    # ===== FLOW 1: Trade Mirroring =====
-    'flow_1_trade_mirroring_enabled': True,
-    'flow_1_interval_sec': MIRROR_TRADE_POLLING_INTERVAL_SEC,
-    'flow_1_time_window_minutes': MIRROR_TRADE_TIME_WINDOW_MINUTES,
-    'flow_1_entry_delay_sec': MIRROR_ENTRY_DELAY_SEC,
-    'flow_1_use_proportional_size': MIRROR_USE_PROPORTIONAL_SIZE,
-    'flow_1_position_size_multiplier': MIRROR_POSITION_SIZE_MULTIPLIER,
-    'flow_1_order_size_ratio': MIRROR_ORDER_SIZE_RATIO,
-    'flow_1_max_order_size_usd': MIRROR_MAX_ORDER_SIZE_USD,
-    'flow_1_min_order_size_usd': MIRROR_MIN_ORDER_SIZE_USD,
-    'flow_1_use_market_orders': MIRROR_USE_MARKET_ORDERS,
-    'flow_1_price_buffer_percent': MIRROR_LIMIT_ORDER_PRICE_BUFFER_PERCENT,
-    'flow_1_max_price_deviation_percent': MIRROR_MARKET_ORDER_MAX_PRICE_DEVIATION_PERCENT,
-    'flow_1_balance_cache_seconds': MIRROR_BALANCE_CACHE_SECONDS,
-    
-    # ===== FLOW 2: Position Alignment =====
-    'flow_2_position_alignment_enabled': True,
-    'flow_2_interval_sec': MIRROR_POSITION_ALIGNMENT_INTERVAL_SEC,
-    'flow_2_closed_positions_limit': MIRROR_CLOSED_POSITIONS_LOOK_BACK_LIMIT,
-    'flow_2_sell_immediately': MIRROR_SELL_IMMEDIATELY_ON_WHALE_EXIT,
-    'flow_2_sell_order_type': MIRROR_SELL_ORDER_TYPE,
-    'flow_2_sell_price_buffer_percent': MIRROR_SELL_PRICE_BUFFER_PERCENT,
-    
-    # ===== FLOW 3: Position Redemption =====
-    'flow_3_position_redemption_enabled': True,
-    'flow_3_interval_sec': MIRROR_POSITION_REDEMPTION_INTERVAL_SEC,
-    'flow_3_auto_redeem': MIRROR_AUTO_REDEEM_CLOSED_POSITIONS,
-    'flow_3_batch_redeem_size': MIRROR_BATCH_REDEEM_SIZE,
-}
-
-# Arbitrage Strategy Configuration (placeholder for future implementation)
+# Arbitrage Strategy Configuration
 ARBITRAGE_STRATEGY_CONFIG = {
-    'enabled': False,
+    'enabled': True,
     'min_profit_percent': 0.01,  # Minimum 1% profit to execute
     'scan_interval_sec': 10,
 }
@@ -420,6 +303,49 @@ ATOMIC_MAX_CONSECUTIVE_FAILURES: Final[int] = 3
 ATOMIC_CIRCUIT_BREAKER_COOLDOWN_SEC: Final[int] = 300  # 5 minutes
 
 # ============================================================================
+# 2026 PRODUCTION SAFEGUARDS
+# ============================================================================
+# Critical production settings for NegRisk, balance management, and FOK handling
+
+# Maximum percentage of available balance to commit per trade (safety guard)
+# Never risk more than 90% of total balance in single execution
+MAX_BALANCE_UTILIZATION_PERCENT: Final[float] = 0.90  # 90% max
+
+# Cooldown period after FOK order fails to fill (in seconds)
+# Prevents chasing moving prices with rapid retries
+FOK_FILL_FAILURE_COOLDOWN_SEC: Final[int] = 10
+
+# NegRisk market detection and handling
+# Automatically detect and flag NegRisk markets for proper signature
+ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
+
+# Dynamic fee rate check interval (cache TTL in seconds)
+# How long to cache fee rates before re-fetching
+FEE_RATE_CACHE_TTL_SEC: Final[int] = 3600  # 1 hour
+
+# Balance check interval for continuous monitoring
+# How often to verify sufficient balance during operation
+BALANCE_CHECK_INTERVAL_SEC: Final[int] = 60  # 1 minute
+
+# ============================================================================
+# PRODUCTION MONITORING & SAFETY (Heartbeat System)
+# ============================================================================
+# Critical production safeguards for automated trading
+
+# Heartbeat interval - how often to log balance and health metrics
+HEARTBEAT_INTERVAL_SEC: Final[int] = 300  # 5 minutes
+
+# Maximum allowed drawdown before emergency kill switch
+# If balance drops by more than this amount, stop all trading
+DRAWDOWN_LIMIT_USD: Final[float] = 10.0  # $10 (10% of $100 budget)
+
+# Auto-redeem check interval - how often to check for resolved markets
+AUTO_REDEEM_INTERVAL_SEC: Final[int] = 600  # 10 minutes
+
+# Graceful shutdown timeout - max time to wait for order cancellations
+GRACEFUL_SHUTDOWN_TIMEOUT_SEC: Final[int] = 30  # 30 seconds
+
+# ============================================================================
 # AWS CONFIGURATION (loaded from environment)
 # ============================================================================
 
@@ -450,3 +376,180 @@ SECRET_KEYS = {
     'POLY_API_SECRET': str,     # Required: L2 API secret (stored in Secrets Manager)
     'POLY_API_PASS': str,       # Required: L2 API passphrase (stored in Secrets Manager)
 }
+
+
+# ============================================================================
+# MAKER-FIRST EXECUTION (2026 Institutional Upgrade)
+# ============================================================================
+
+# Enable post-only orders (maker-only, never taker)
+# Ensures we always provide liquidity and prepare for maker rebates
+ENABLE_POST_ONLY_ORDERS: Final[bool] = True
+
+# Post-only spread offset (dollars)
+# Target_Price = Best_Bid + OFFSET (for BUY orders)
+# This ensures we "join the bid" rather than "hit the ask"
+POST_ONLY_SPREAD_OFFSET: Final[float] = 0.01
+
+# Post-only order timeout before giving up (seconds)
+POST_ONLY_TIMEOUT_SEC: Final[int] = 30
+
+# Cooldown after INVALID_POST_ONLY_ORDER error (spread crossed)
+# When our maker order would cross the spread, wait for next price scan
+# This prevents us from accidentally becoming a taker
+POST_ONLY_ERROR_COOLDOWN_SEC: Final[int] = 60
+
+# Maximum order age before auto-cancel (seconds)
+# If order remains unfilled for this long, cancel to avoid stale prices
+MAX_ORDER_AGE_SEC: Final[int] = 300  # 5 minutes
+
+# Order monitoring interval (seconds)
+# How often to check unfilled orders
+ORDER_MONITOR_INTERVAL_SEC: Final[int] = 10
+
+# Order heartbeat interval (seconds)
+# Monitor GTC orders and cancel if not filled within this time
+# User requirement: 60 seconds to prevent stale orders
+ORDER_HEARTBEAT_INTERVAL_SEC: Final[int] = 60
+
+# Price walking step for maker orders (dollars)
+# If INVALID_POST_ONLY_ORDER, retry with this increment if still profitable
+# User requirement: $0.001 increments
+MAKER_RETRY_PRICE_STEP: Final[float] = 0.001
+
+
+# ============================================================================
+# REBATE OPTIMIZATION (2026 Institutional Trading)
+# ============================================================================
+
+# Rebate priority weight for scanner ranking
+# Markets in optimal price range ($0.20-$0.80) get this multiplier
+# Per Polymarket team: rebate pools are largest in this range
+REBATE_PRIORITY_WEIGHT: Final[float] = 2.0
+
+# Optimal price range for rebate accumulation
+# Polymarket rebates are highest for trades between these prices
+REBATE_OPTIMAL_PRICE_MIN: Final[float] = 0.20
+REBATE_OPTIMAL_PRICE_MAX: Final[float] = 0.80
+
+# Auto-redemption check interval (seconds)
+# How often to scan for resolved markets and redeem shares
+# User requirement: hourly (3600 seconds)
+CHECK_AND_REDEEM_INTERVAL_SEC: Final[int] = 3600
+
+
+# ============================================================================
+# NEGRISK MARKET DETECTION (2026 Multi-Choice Support)
+# ============================================================================
+
+# Enable automatic NegRisk market detection
+# NegRisk markets have >2 outcomes and require special signatures
+ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
+
+# Cache NegRisk detection results (reduces API calls)
+NEGRISK_CACHE_TTL_SEC: Final[int] = 3600  # 1 hour
+
+
+# ============================================================================
+# BATCH ORDER EXECUTION (HFT Optimization)
+# ============================================================================
+
+# Maximum orders per batch (Polymarket limit)
+MAX_BATCH_SIZE: Final[int] = 15
+
+# Retry cooldown after batch failure (seconds)
+RETRY_COOLDOWN: Final[int] = 15
+
+# Rate limit: Burst capacity (requests per second)
+RATE_LIMIT_BURST: Final[int] = 100
+
+# Rate limit: Sustained capacity (requests per second)
+RATE_LIMIT_SUSTAINED: Final[int] = 25
+
+# Re-sync wait time after partial batch failure (seconds)
+BATCH_RESYNC_WAIT: Final[int] = 15
+
+# ============================================================================
+# CAPITAL MANAGEMENT (Negative Risk & Exposure)
+# ============================================================================
+
+# Maximum total exposure in USDC (principal protection on $100 budget)
+MAX_TOTAL_EXPOSURE: Final[float] = 95.0
+
+# NegRisk Adapter contract address for token conversion
+NEGRISK_ADAPTER_ADDRESS: Final[str] = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+
+# CTF Exchange contract (for allowance checks)
+CTF_EXCHANGE_ADDRESS: Final[str] = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+
+# USDC contract address on Polygon
+USDC_ADDRESS: Final[str] = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+# CTF (Conditional Token Framework) contract for merge operations
+CTF_CONTRACT_ADDRESS: Final[str] = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+
+# Merge pause duration after relayer transaction failure (seconds)
+MERGE_FAILURE_PAUSE_SEC: Final[int] = 60
+
+
+# ============================================================================
+# RELIABILITY & REBOOT RECOVERY
+# ============================================================================
+
+# Delayed order monitoring timeout (seconds)
+DELAYED_ORDER_TIMEOUT_SEC: Final[int] = 30
+
+# Delayed order check interval (seconds)
+DELAYED_ORDER_CHECK_INTERVAL_SEC: Final[int] = 5
+
+# Self-trade prevention: check interval (seconds)
+STP_CHECK_INTERVAL_SEC: Final[int] = 2
+
+# Self-trade prevention: cooldown after cancellation (seconds)
+# Per Polymarket support: Wait 1 second after cancelling to prevent race conditions
+# Ensures matching engine has fully cleared the old order before posting new one
+STP_COOLDOWN: Final[float] = 1.0
+
+# Nonce resynchronization on boot
+ENABLE_NONCE_SYNC_ON_BOOT: Final[bool] = True
+
+# State persistence interval (seconds)
+STATE_PERSISTENCE_INTERVAL_SEC: Final[int] = 60
+
+# State file path
+BOT_STATE_FILE: Final[str] = "bot_state.json"
+
+# ============================================================================
+# HFT ORDER STATE MACHINE (2026 Market-Aware Timing)
+# ============================================================================
+
+# Market-aware delay thresholds (seconds)
+# Different market types have different matching engine latencies
+DELAY_THRESHOLDS: Final[Dict[str, float]] = {
+    "sports": 12.0,    # Sports events: slower matching (12s)
+    "crypto": 5.0,     # Crypto markets: fast matching (5s)
+    "politics": 7.0,   # Politics: standard matching (7s)
+    "default": 7.0     # Other markets: standard matching (7s)
+}
+
+# Order state machine polling interval (seconds)
+# Poll order status every 2 seconds for PENDING/DELAYED orders
+ORDER_STATE_POLL_INTERVAL_SEC: Final[int] = 2
+
+# Batch partial-fill hold duration (seconds)
+# If 1 leg is DELAYED while others are MATCHED, hold for this duration
+# Protects arbitrage hedge by allowing delayed leg to fill
+BATCH_DELAYED_LEG_HOLD_SEC: Final[int] = 10
+
+# Clean exit: cancel all DELAYED orders on shutdown
+CANCEL_DELAYED_ON_SHUTDOWN: Final[bool] = True
+# ============================================================================
+# REBATE TRACKING (Maker Volume Logging)
+# ============================================================================
+
+# Enable detailed maker rebate tracking logs
+# Logs successful fills for rebate eligibility verification
+ENABLE_REBATE_TRACKING: Final[bool] = True
+
+# Rebate log file location
+REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"

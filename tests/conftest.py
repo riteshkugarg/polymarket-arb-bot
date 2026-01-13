@@ -5,8 +5,13 @@ Provides fixtures and shared test utilities
 
 import pytest
 import asyncio
+import sys
+import os
 from unittest.mock import Mock, MagicMock
 from decimal import Decimal
+
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
 
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
