@@ -1,0 +1,30 @@
+[Unit]
+Description=Polymarket Arbitrage Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-arb-bot
+Environment="PYTHONUNBUFFERED=1"
+Environment="AWS_REGION=eu-west-1"
+Environment="PYTHONPATH=/home/ubuntu/polymarket-arb-bot/src"
+ExecStart=/home/ubuntu/polymarket-arb-bot/venv/bin/python3 /home/ubuntu/polymarket-arb-bot/src/main.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+StandardOutput=append:/home/ubuntu/polymarket-arb-bot/logs/bot_stdout.log
+StandardError=append:/home/ubuntu/polymarket-arb-bot/logs/bot_stderr.log
+
+# Security settings (relaxed for venv access)
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

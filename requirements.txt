@@ -1,0 +1,29 @@
+# Core Dependencies
+py-clob-client==0.23.0  # Polymarket CLOB client
+web3>=6.20.0  # Ethereum interaction (updated for compatibility with eth-account>=0.13.0)
+eth-account>=0.13.0  # Ethereum account management (required by py-clob-client)
+
+# AWS
+boto3==1.34.34  # AWS SDK
+botocore==1.34.34
+
+# HTTP & Async
+aiohttp==3.9.1
+requests==2.31.0
+httpx==0.26.0
+
+# Utilities
+python-dotenv==1.0.0  # Environment variables
+pydantic==2.5.3  # Data validation
+pydantic-settings==2.1.0
+
+# Monitoring & Logging
+structlog==24.1.0  # Structured logging
+python-json-logger==2.0.7
+
+# Performance
+asyncio==3.4.3
+backoff==2.2.1  # Retry with exponential backoff
+
+# Date & Time
+python-dateutil==2.8.2
