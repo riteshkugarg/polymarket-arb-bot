@@ -258,6 +258,10 @@ class PolymarketBot:
             self.client = PolymarketClient()
             await self.client.initialize()
             
+            # [SAFETY] FIX 2: Explicit Nonce Sync on Startup
+            # Prevent INVALID_NONCE errors from bot/server desync
+            await self.sync_header_nonce()
+            
             # Initialize order manager
             self.order_manager = OrderManager(self.client)
             
@@ -2774,6 +2778,18 @@ class PolymarketBot:
                     f"  Index Set: {index_set}"
                 )
                 
+                # [SAFETY] FIX 3: Verify Full Partition Coverage
+                # Must hold all outcome indices before merging
+                if not self.verify_full_partition_coverage(full_set):
+                    logger.error(
+                        f"[MERGE] ⚠️  ABORT: Incomplete partition detected!\\n"
+                        f"  Market: {market_name[:50]}...\\n"
+                        f"  Missing or unnamed outcome indices\\n"
+                        f"  Reason: Would waste gas on failed transaction\\n"
+                        f"  Action: Skipping this merge"
+                    )
+                    continue
+                
                 # Trigger merge
                 success = await self.merge_positions_python(
                     condition_id=condition_id,
@@ -2873,6 +2889,119 @@ class PolymarketBot:
             except Exception as e:
                 logger.error(f"Auto-redeem error: {e}", exc_info=True)
 
+    async def sync_header_nonce(self) -> None:
+        """
+        [SAFETY] FIX 2: Explicit Nonce Sync on Startup
+        
+        Fetches the current nonce from Polymarket API and sets it in the
+        session headers to prevent INVALID_NONCE errors from bot/server desync.
+        
+        Called during bot initialization to ensure nonce alignment.
+        """
+        try:
+            logger.info("[NONCE] Syncing header nonce with Polymarket API...")
+            
+            # Fetch current nonce from API
+            if hasattr(self.client, 'get_nonce'):
+                current_nonce = await self.client.get_nonce()
+            elif hasattr(self.client._client, 'get_nonce'):
+                current_nonce = await self.client._client.get_nonce()
+            else:
+                # Fallback: fetch from /nonce endpoint
+                async with self.client._session.get(
+                    f"{self.client._client.clob_url}/nonce"
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        current_nonce = data.get('nonce', 0)
+                    else:
+                        logger.warning("[NONCE] Failed to fetch nonce from API")
+                        return
+            
+            # Set POLY_NONCE header in session
+            if hasattr(self.client, '_session') and self.client._session:
+                self.client._session.headers['POLY_NONCE'] = str(current_nonce)
+                logger.info(f"[NONCE] ✅ Header nonce synced: {current_nonce}")
+            elif hasattr(self.client._client, 'session'):
+                self.client._client.session.headers['POLY_NONCE'] = str(current_nonce)
+                logger.info(f"[NONCE] ✅ Header nonce synced: {current_nonce}")
+            else:
+                logger.warning("[NONCE] Could not set header - session not found")
+            
+            # Store for state persistence
+            self._last_nonce = current_nonce
+            
+        except Exception as e:
+            logger.error(f"[NONCE] Failed to sync header nonce: {e}")
+    
+    def verify_full_partition_coverage(self, full_set: Dict[str, Any]) -> bool:
+        """
+        [SAFETY] FIX 3: Full Partition Coverage Validator
+        
+        Verifies that we hold NO tokens for ALL outcome indices (0 to N)
+        before attempting to merge. If any index is missing or unnamed,
+        the merge will fail on-chain and waste gas.
+        
+        Args:
+            full_set: Full set data from detect_full_sets()
+            
+        Returns:
+            True if all indices covered, False if incomplete
+        """
+        try:
+            index_set = full_set.get("index_set", [])
+            market_info = full_set.get("market_info", {})
+            outcomes = market_info.get("outcomes", [])
+            
+            # Get expected number of outcomes
+            num_outcomes = len(outcomes)
+            
+            if num_outcomes == 0:
+                logger.warning("[MERGE] No outcomes found in market info")
+                return False
+            
+            # Check if we have all indices from 0 to N-1
+            expected_indices = set(range(num_outcomes))
+            actual_indices = set(index_set)
+            
+            if expected_indices != actual_indices:
+                missing_indices = expected_indices - actual_indices
+                extra_indices = actual_indices - expected_indices
+                
+                logger.error(
+                    f"[MERGE] Partition coverage incomplete!\n"
+                    f"  Expected indices: {sorted(expected_indices)}\n"
+                    f"  Actual indices: {sorted(actual_indices)}\n"
+                    f"  Missing: {sorted(missing_indices) if missing_indices else 'None'}\n"
+                    f"  Extra: {sorted(extra_indices) if extra_indices else 'None'}"
+                )
+                return False
+            
+            # Verify no unnamed or placeholder outcomes
+            for idx in index_set:
+                if idx >= len(outcomes):
+                    logger.error(
+                        f"[MERGE] Index {idx} out of bounds (max: {len(outcomes)-1})"
+                    )
+                    return False
+                
+                outcome_name = outcomes[idx]
+                if not outcome_name or outcome_name.strip() == "":
+                    logger.error(
+                        f"[MERGE] Unnamed outcome at index {idx}"
+                    )
+                    return False
+            
+            logger.debug(
+                f"[MERGE] ✅ Full partition coverage verified: "
+                f"{num_outcomes} outcomes, all indices present"
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(f"[MERGE] Error verifying partition coverage: {e}")
+            return False
+    
     async def _health_check_loop(self) -> None:
         """Periodic health checks for the bot"""
         logger.info("Health check loop started")

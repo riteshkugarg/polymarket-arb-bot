@@ -252,6 +252,15 @@ class ArbScanner:
             if not market_id or not condition_id:
                 return None
             
+            # [SAFETY] FIX 1: Skip Augmented NegRisk Markets (capital lock prevention)
+            # Augmented markets can lock capital indefinitely - skip them
+            if market.get('negRiskAugmented', False):
+                logger.warning(
+                    f"[SAFETY] Skipping Augmented Market: {market_id[:8]}...\n"
+                    f"  Reason: negRiskAugmented=True (capital lock risk)"
+                )
+                return None
+            
             # Check market type - must be multi-outcome for arbitrage
             outcomes = market.get('outcomes', [])
             if not outcomes or len(outcomes) < 2:
