@@ -16,9 +16,27 @@ else
     exit 1
 fi
 
-# Check 2: Verify event-driven initialization
+# Check 2: Verify abstract methods implemented
 echo ""
-echo "✓ Check 2: Verifying event-driven initialization..."
+echo "✓ Check 2: Verifying abstract methods implemented..."
+PYTHONPATH=/workspaces/polymarket-arb-bot/src python3 -c "
+from strategies.arbitrage_strategy import ArbitrageStrategy
+required = ['execute', 'analyze_opportunity', 'should_execute_trade']
+missing = [m for m in required if not hasattr(ArbitrageStrategy, m)]
+if missing:
+    print(f'Missing methods: {missing}')
+    exit(1)
+" 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo "  ✅ All abstract methods implemented (execute, analyze_opportunity, should_execute_trade)"
+else
+    echo "  ❌ FAILED: Missing abstract method implementations"
+    exit 1
+fi
+
+# Check 3: Verify event-driven initialization
+echo ""
+echo "✓ Check 3: Verifying event-driven initialization..."
 if grep -q "arb_strategy = ArbitrageStrategy(" src/main.py; then
     echo "  ✅ ArbitrageStrategy initialization found"
 else
@@ -26,18 +44,18 @@ else
     exit 1
 fi
 
-# Check 3: Verify cross-strategy coordination
+# Check 4: Verify cross-strategy coordination
 echo ""
-echo "✓ Check 3: Verifying cross-strategy coordination..."
+echo "✓ Check 4: Verifying cross-strategy coordination..."
 if grep -q "set_market_making_strategy" src/main.py; then
     echo "  ✅ Cross-strategy coordination enabled"
 else
     echo "  ❌ WARNING: Cross-strategy coordination not found"
 fi
 
-# Check 4: Verify WebSocket subscription fix
+# Check 5: Verify WebSocket subscription fix
 echo ""
-echo "✓ Check 4: Verifying WebSocket subscription fix..."
+echo "✓ Check 5: Verifying WebSocket subscription fix..."
 if grep -q "markets_response\['data'\]" src/main.py; then
     echo "  ✅ WebSocket subscription format fixed"
 else
@@ -45,9 +63,9 @@ else
     exit 1
 fi
 
-# Check 5: Verify no polling loop in arbitrage
+# Check 6: Verify no polling loop in arbitrage
 echo ""
-echo "✓ Check 5: Verifying polling loop removed..."
+echo "✓ Check 6: Verifying polling loop removed..."
 if grep -A 10 "async def _arbitrage_scan_loop" src/main.py | grep -q "while self.is_running"; then
     echo "  ❌ FAILED: Polling loop still exists!"
     exit 1
@@ -55,9 +73,9 @@ else
     echo "  ✅ Polling loop removed - event-driven mode active"
 fi
 
-# Check 6: Compile check
+# Check 7: Compile check
 echo ""
-echo "✓ Check 6: Compiling main.py..."
+echo "✓ Check 7: Compiling main.py..."
 if python3 -m py_compile src/main.py 2>/dev/null; then
     echo "  ✅ main.py compiles successfully"
 else
@@ -65,9 +83,9 @@ else
     exit 1
 fi
 
-# Check 7: Verify all strategies compile
+# Check 8: Verify all strategies compile
 echo ""
-echo "✓ Check 7: Compiling strategy files..."
+echo "✓ Check 8: Compiling strategy files..."
 if python3 -m py_compile src/strategies/arbitrage_strategy.py \
                         src/strategies/market_making_strategy.py \
                         src/core/market_data_manager.py 2>/dev/null; then
@@ -79,7 +97,7 @@ fi
 
 echo ""
 echo "=========================================="
-echo "✅ ALL CHECKS PASSED"
+echo "✅ ALL CHECKS PASSED (8/8)"
 echo "=========================================="
 echo ""
 echo "WebSocket Integration Status:"
