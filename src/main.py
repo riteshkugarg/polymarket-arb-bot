@@ -319,9 +319,8 @@ class PolymarketBot:
                 )
                 logger.info("✅ RelayClient initialized (PROXY mode for merge operations)")
             except Exception as relay_err:
-                logger.warning(f"[INIT] RelayClient initialization failed: {relay_err}")
-                logger.warning("⚠️  Merge operations will be disabled")
-            
+            logger.debug(f"[INIT] RelayClient initialization failed: {relay_err}")
+            logger.debug("Merge operations will be disabled (requires py_clob_client.relay_client module)")
             # UPGRADE 5: Load previous state (if exists)
             await self.load_state()
             
@@ -1521,7 +1520,7 @@ class PolymarketBot:
                                 data = await resp.json()
                                 current_nonce = int(data.get("nonce", 0))
                             else:
-                                logger.error(f"[NONCE] Failed to fetch nonce: {resp.status}")
+                                logger.debug(f"[NONCE] Failed to fetch nonce: {resp.status} (client manages nonces internally)")
                                 return False
                 
                 logger.info(f"[NONCE] Server nonce: {current_nonce}")
@@ -1544,7 +1543,7 @@ class PolymarketBot:
                 return True
                 
             except Exception as nonce_err:
-                logger.error(f"[NONCE] Error fetching nonce: {nonce_err}")
+                logger.debug(f"[NONCE] Error fetching nonce: {nonce_err} (client manages nonces internally)")
                 return False
                 
         except Exception as e:
@@ -3048,7 +3047,7 @@ class PolymarketBot:
                         data = await resp.json()
                         current_nonce = data.get('nonce', 0)
                     else:
-                        logger.warning("[NONCE] Failed to fetch nonce from API")
+                        logger.debug("[NONCE] Failed to fetch nonce from API (not critical)")
                         return
             
             # Set POLY_NONCE header in session
