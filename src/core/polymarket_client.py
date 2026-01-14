@@ -277,10 +277,16 @@ class PolymarketClient:
         
         try:
             logger.debug("Fetching markets from Polymarket")
-            response = await asyncio.to_thread(
-                self._client.get_markets,
-                next_cursor=next_cursor
-            )
+            # Only pass next_cursor if it's provided and valid
+            if next_cursor:
+                response = await asyncio.to_thread(
+                    self._client.get_markets,
+                    next_cursor=next_cursor
+                )
+            else:
+                response = await asyncio.to_thread(
+                    self._client.get_markets
+                )
             logger.debug(f"Retrieved {len(response.get('data', []))} markets")
             return response
             
