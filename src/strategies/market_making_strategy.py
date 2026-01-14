@@ -778,12 +778,11 @@ class MarketMakingStrategy(BaseStrategy):
         logger.debug("Scanning for eligible market making opportunities...")
         
         try:
-            # INSTITUTION-GRADE: Fetch markets with pagination AND API FILTERS
-            # Per Polymarket Support (Jan 2026): Use volume_num_min and liquidity_num_min
-            # For $50 capital: volume_num_min=10, liquidity_num_min=20 (not $100)
+            # DISCOVERY MODE: Fetch markets with pagination (10 pages = 1000 markets)
+            # Previous: 5 pages (500 markets) - not enough to find eligible markets
             all_markets = []
             next_cursor = None
-            max_pages = 5  # Fetch up to 5 pages (500 markets total)
+            max_pages = 10  # Increased from 5 to find more opportunities
             
             for page in range(max_pages):
                 if next_cursor == 'END':  # No more results
@@ -884,13 +883,10 @@ class MarketMakingStrategy(BaseStrategy):
         return (True, 'passed')
     
     def _is_market_eligible(self, market: Dict[str, Any]) -> bool:
-        """Check if market meets criteria for market making (INSTITUTION-GRADE)
+        """Check if market meets criteria for market making
         
-        Per Polymarket Support (Jan 2026):
-        - Liquidity > Volume (orderbook depth more important than trading history)
-        - NegRisk is SAFE with proper negrisk=True flag in orders
-        - For $50 capital: liquidity_num_min=20, volume_num_min=50
-        - Prefer binary markets for simplicity
+        DISCOVERY MODE: Ultra-permissive - accept EITHER volume OR liquidity
+        Previous: Required BOTH (too strict - found 0 markets)
         """
         # Binary market check
         tokens = market.get('tokens', [])
@@ -901,20 +897,15 @@ class MarketMakingStrategy(BaseStrategy):
         if market.get('closed', False) or not market.get('active', True):
             return False
         
-        # CRITICAL: Liquidity check (more important than volume)
+        # DISCOVERY MODE: Accept if EITHER criterion met
         liquidity = market.get('liquidity', 0)
-        if liquidity < MM_MIN_LIQUIDITY:
-            return False
-        
-        # Volume threshold (secondary)
         volume_24h = market.get('volume24hr', 0)
-        if volume_24h < MM_MIN_MARKET_VOLUME_24H:
-            return False
         
-        # INSTITUTION-GRADE: NegRisk is SAFE (per Polymarket Support Jan 2026)
-        # "NegRisk markets are safe to trade with proper understanding"
-        # Key: Must set negrisk=True in OrderArgs
-        # Removed blanket rejection - we now handle NegRisk properly
+        has_liquidity = liquidity >= MM_MIN_LIQUIDITY
+        has_volume = volume_24h >= MM_MIN_MARKET_VOLUME_24H
+        
+        if not (has_liquidity or has_volume):
+            return False
         
         # Accepting orders check
         if not market.get('acceptingOrders', True):

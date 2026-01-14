@@ -515,14 +515,15 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 # Market Selection
 # -----------------
 # Minimum 24h volume to consider for market making (USD)
-# Per Polymarket Support (Jan 2026): $50/day for small capital ($50 allocation)
-# Rationale: "With $50 capital, focus on markets with sufficient liquidity rather than just volume"
-MM_MIN_MARKET_VOLUME_24H: Final[float] = 50.0
+# DISCOVERY MODE: $10/day (ultra-low for finding ANY active markets)
+# Per Polymarket Support: Start low, increase based on what's available
+# Previous: $50 (still too high - found 0 markets)
+MM_MIN_MARKET_VOLUME_24H: Final[float] = 10.0
 
 # Minimum liquidity (orderbook depth) - MORE CRITICAL THAN VOLUME
-# Per Polymarket Support: "Liquidity is more critical for market makers"
-# Recommended: liquidity_num_min=20 for small capital
-MM_MIN_LIQUIDITY: Final[float] = 20.0
+# DISCOVERY MODE: $5 (ultra-low to discover what's actually available)
+# Previous: $20 (too high - found 0 markets)
+MM_MIN_LIQUIDITY: Final[float] = 5.0
 
 # Minimum depth (shares) on best bid/ask
 # Per Polymarket Support: "Lower to 5 shares (or even lower) with $50 capital"

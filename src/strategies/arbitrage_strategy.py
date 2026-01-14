@@ -392,9 +392,10 @@ class ArbitrageStrategy(BaseStrategy):
                 all_events.extend(events)
                 offset += limit
                 
-                # Safety: Cap at 500 events to avoid excessive API calls
-                if len(all_events) >= 500:
-                    logger.info("Reached 500 event limit - stopping discovery")
+                # DISCOVERY MODE: Scan up to 2000 events (was 500 - too low)
+                # Multi-outcome events may be rare - need larger sample
+                if len(all_events) >= 2000:
+                    logger.info(f"Reached 2000 event limit - stopping discovery")
                     break
             
             logger.debug(f"Fetched {len(all_events)} total events from Gamma API")
@@ -464,6 +465,17 @@ class ArbitrageStrategy(BaseStrategy):
                 f"   ✅ PASSED FILTER: {len(multi_outcome_events)} events\n"
                 f"   ✅ Total assets: {len(self._arb_eligible_markets)}"
             )
+            
+            # FALLBACK: If no multi-outcome events found, log guidance
+            if len(multi_outcome_events) == 0:
+                logger.warning(
+                    f"⚠️  NO MULTI-OUTCOME EVENTS FOUND (scanned {len(all_events)} events)\n"
+                    f"   Per Polymarket Support: Most markets are binary (2 outcomes)\n"
+                    f"   Binary arbitrage is IMPOSSIBLE by design (YES + NO = $1.00)\n"
+                    f"   \n"
+                    f"   RECOMMENDATION: Focus on Market Making strategy\n"
+                    f"   Or consider cross-exchange arbitrage (Polymarket ↔ Kalshi/Manifold)"
+                )
             
             logger.info(
                 f"Discovered {len(self._arb_eligible_markets)} arb-eligible assets "
