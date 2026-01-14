@@ -319,8 +319,8 @@ class PolymarketBot:
                 )
                 logger.info("✅ RelayClient initialized (PROXY mode for merge operations)")
             except Exception as relay_err:
-            logger.debug(f"[INIT] RelayClient initialization failed: {relay_err}")
-            logger.debug("Merge operations will be disabled (requires py_clob_client.relay_client module)")
+                logger.debug(f"[INIT] RelayClient initialization failed: {relay_err}")
+                logger.debug("Merge operations will be disabled (requires py_clob_client.relay_client module)")
             # UPGRADE 5: Load previous state (if exists)
             await self.load_state()
             
