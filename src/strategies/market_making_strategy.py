@@ -54,6 +54,8 @@ from config.constants import (
     
     # Market selection
     MM_MIN_MARKET_VOLUME_24H,
+    MM_MIN_LIQUIDITY,
+    MM_MIN_DEPTH_SHARES,
     MM_MAX_SPREAD_PERCENT,
     MM_PREFER_BINARY_MARKETS,
     MM_MAX_ACTIVE_MARKETS,
