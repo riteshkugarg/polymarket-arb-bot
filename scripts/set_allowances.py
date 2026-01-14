@@ -30,9 +30,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from web3 import Web3
 from eth_account import Account
-from utils.logger import get_logger
+from utils.logger import get_logger, setup_logging
 from config.aws_config import get_aws_config
 
+# Initialize logging
+setup_logging()
 logger = get_logger(__name__)
 
 # Contract addresses
