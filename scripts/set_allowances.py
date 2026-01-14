@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from web3 import Web3
 from eth_account import Account
 from utils.logger import get_logger
+from config.aws_config import get_aws_config
 
 logger = get_logger(__name__)
 
@@ -71,11 +72,31 @@ def main():
     logger.info("NegRisk Adapter Allowance Setup")
     logger.info("=" * 80)
     
-    # Get private key from environment
-    private_key = os.getenv("PK")
+    # Try AWS Secrets Manager first, fallback to environment variable
+    private_key = None
+    
+    # Option 1: AWS Secrets Manager (production on EC2)
+    try:
+        logger.info("Attempting to load credentials from AWS Secrets Manager...")
+        aws_config = get_aws_config()
+        secrets = aws_config.get_secrets()
+        private_key = secrets.get("WALLET_PRIVATE_KEY")
+        logger.info("✅ Loaded credentials from AWS Secrets Manager")
+    except Exception as e:
+        logger.warning(f"Could not load from AWS Secrets Manager: {e}")
+        logger.info("Falling back to PK environment variable...")
+    
+    # Option 2: Environment variable (local development/testing)
     if not private_key:
-        logger.error("❌ PK environment variable not set")
-        logger.info("Export your private key: export PK='your_private_key_here'")
+        private_key = os.getenv("PK")
+        if private_key:
+            logger.info("✅ Loaded credentials from PK environment variable")
+    
+    if not private_key:
+        logger.error("❌ Could not load private key from any source")
+        logger.info("\nOptions:")
+        logger.info("  1. Run on EC2 with AWS Secrets Manager configured")
+        logger.info("  2. Set PK environment variable: export PK='your_private_key'")
         sys.exit(1)
     
     # Remove 0x prefix if present
