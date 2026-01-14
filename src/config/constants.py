@@ -56,27 +56,10 @@ ENTRY_PRICE_GUARD: Final[float] = 0.0005
 # This maintains true proportional relationship with whale's trades
 MAX_ORDER_USD: Final[float] = 3.6
 
-# Ignore positions smaller than this threshold (in USDC)
-DUST_THRESHOLD: Final[float] = 0.1
-
 # Maximum acceptable slippage percentage (3%)
 # Increased for market orders to allow natural price movement
 # Trades will fail if slippage exceeds this limit
 MAX_SLIPPAGE_PERCENT: Final[float] = 0.03
-
-# ============================================================================
-# POLYMARKET ERROR CODES (from official support)
-# ============================================================================
-
-# Common order rejection reasons:
-ERROR_INSUFFICIENT_BALANCE: Final[str] = "INVALID_ORDER_NOT_ENOUGH_BALANCE"
-ERROR_FOK_NOT_FILLED: Final[str] = "FOK_ORDER_NOT_FILLED_ERROR"
-ERROR_INVALID_EXPIRATION: Final[str] = "INVALID_ORDER_EXPIRATION"
-ERROR_MARKET_NOT_READY: Final[str] = "MARKET_NOT_READY"
-
-# FOK order specific error message
-FOK_ERROR_MESSAGE: Final[str] = "order couldn't be fully filled, FOK orders are fully filled/killed"
-
 
 # Mirror strategy price bounds (for BUY orders only)
 # Don't buy below this price (very unlikely outcomes with minimal value)
@@ -89,20 +72,6 @@ MAX_BUY_PRICE: Final[float] = 0.85
 # Polymarket minimum order size (in shares)
 # Orders below 5 shares are rejected by the exchange
 MIN_ORDER_SHARES: Final[int] = 5
-
-# ============================================================================
-# TIME-BASED ENTRY FILTERING (per Polymarket support - Jan 2026)
-# ============================================================================
-
-
-# Only mirror positions where whale entered within this time window
-# Prevents copying old positions where whale may already be at a loss
-# Changed to 10 minutes for a slightly longer window
-ENTRY_TIME_WINDOW_MINUTES: Final[int] = 10
-
-# Enable time-based filtering (set to False to disable)
-ENABLE_TIME_BASED_FILTERING: Final[bool] = True
-
 
 # ============================================================================
 # OPERATIONAL PARAMETERS
@@ -138,9 +107,6 @@ MAX_BACKOFF_DELAY: Final[float] = 10.0
 # Gamma API: 300 req/10s, 3000 req/10min  
 # CLOB reads: 1500 req/10s, 15000 req/10min
 
-# Bot trading rate (orders per minute) - conservative vs L2 limits
-# L2 allows 36000/10min = 3600/min, but we stay conservative
-MAX_ORDERS_PER_MINUTE: Final[int] = 100
 MAX_BACKOFF_DELAY: Final[float] = 60.0
 
 
@@ -164,10 +130,6 @@ POLYMARKET_DATA_API_URL: Final[str] = "https://data-api.polymarket.com"
 # Rate Limits: General = 4000 req/10s, /markets endpoint = 300 req/10s
 # Note: Token IDs are STABLE and don't change, so cache them long-term
 POLYMARKET_GAMMA_API_URL: Final[str] = "https://gamma-api.polymarket.com"
-
-# Polymarket WebSocket API - for real-time whale tracking (future enhancement)
-# Latency: ~100ms for real-time trade feeds
-POLYMARKET_WEBSOCKET_URL: Final[str] = "wss://ws-live-data.polymarket.com"
 
 # Polygon network configuration (Polymarket runs on Polygon)
 POLYGON_RPC_URL: Final[str] = "https://polygon-rpc.com"
@@ -219,12 +181,6 @@ HEALTH_CHECK_INTERVAL_SEC: Final[int] = 60
 # Maximum consecutive errors before alerting
 MAX_CONSECUTIVE_ERRORS: Final[int] = 5
 
-# Enable performance metrics collection
-ENABLE_METRICS: Final[bool] = True
-
-# Metrics export interval (seconds)
-METRICS_EXPORT_INTERVAL_SEC: Final[int] = 300
-
 
 # ============================================================================
 # SAFETY LIMITS
@@ -234,30 +190,12 @@ METRICS_EXPORT_INTERVAL_SEC: Final[int] = 300
 # Reduced to 50 USD for initial conservative deployment
 MAX_POSITION_SIZE_USD: Final[float] = 50.0
 
-# Maximum daily trading volume in USDC
-MAX_DAILY_VOLUME_USD: Final[float] = 10000.0
-
-# Maximum number of open positions
-MAX_OPEN_POSITIONS: Final[int] = 20
-
 # Enable circuit breaker on large losses
 ENABLE_CIRCUIT_BREAKER: Final[bool] = True
 
 # Circuit breaker loss threshold (USD)
 # Reduced to 25 USD for small account protection during initial deployment
 CIRCUIT_BREAKER_LOSS_THRESHOLD_USD: Final[float] = 25.0
-
-
-# ============================================================================
-# STRATEGY-SPECIFIC CONFIGURATION - ARBITRAGE STRATEGY
-# ============================================================================
-
-# Arbitrage Strategy Configuration
-ARBITRAGE_STRATEGY_CONFIG = {
-    'enabled': True,
-    'min_profit_percent': 0.01,  # Minimum 1% profit to execute
-    'scan_interval_sec': 10,
-}
 
 
 # ============================================================================
@@ -298,10 +236,6 @@ ATOMIC_FAILURE_COOLDOWN_SEC: Final[int] = 30
 # Bot pauses atomic execution after this many consecutive failures
 ATOMIC_MAX_CONSECUTIVE_FAILURES: Final[int] = 3
 
-# Circuit breaker cooldown duration (in seconds)
-# How long to pause execution after circuit breaker triggers
-ATOMIC_CIRCUIT_BREAKER_COOLDOWN_SEC: Final[int] = 300  # 5 minutes
-
 # ============================================================================
 # 2026 PRODUCTION SAFEGUARDS
 # ============================================================================
@@ -318,14 +252,6 @@ FOK_FILL_FAILURE_COOLDOWN_SEC: Final[int] = 10
 # NegRisk market detection and handling
 # Automatically detect and flag NegRisk markets for proper signature
 ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
-
-# Dynamic fee rate check interval (cache TTL in seconds)
-# How long to cache fee rates before re-fetching
-FEE_RATE_CACHE_TTL_SEC: Final[int] = 3600  # 1 hour
-
-# Balance check interval for continuous monitoring
-# How often to verify sufficient balance during operation
-BALANCE_CHECK_INTERVAL_SEC: Final[int] = 60  # 1 minute
 
 # ============================================================================
 # PRODUCTION MONITORING & SAFETY (Heartbeat System)
@@ -401,9 +327,6 @@ MAX_DYNAMIC_OFFSET_TICKS: Final[int] = 3
 # This ensures we "join the bid" rather than "hit the ask"
 POST_ONLY_SPREAD_OFFSET: Final[float] = 0.01
 
-# Post-only order timeout before giving up (seconds)
-POST_ONLY_TIMEOUT_SEC: Final[int] = 30
-
 # Cooldown after INVALID_POST_ONLY_ORDER error (spread crossed)
 # When our maker order would cross the spread, wait for next price scan
 # This prevents us from accidentally becoming a taker
@@ -446,18 +369,6 @@ REBATE_OPTIMAL_PRICE_MAX: Final[float] = 0.80
 # How often to scan for resolved markets and redeem shares
 # User requirement: hourly (3600 seconds)
 CHECK_AND_REDEEM_INTERVAL_SEC: Final[int] = 3600
-
-
-# ============================================================================
-# NEGRISK MARKET DETECTION (2026 Multi-Choice Support)
-# ============================================================================
-
-# Enable automatic NegRisk market detection
-# NegRisk markets have >2 outcomes and require special signatures
-ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
-
-# Cache NegRisk detection results (reduces API calls)
-NEGRISK_CACHE_TTL_SEC: Final[int] = 3600  # 1 hour
 
 
 # ============================================================================
