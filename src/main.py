@@ -28,6 +28,7 @@ from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor
 from core.maker_executor import get_maker_executor
 from strategies.arbitrage_strategy import ArbitrageStrategy
 from strategies.arb_scanner import ArbScanner
+from strategies.market_making_strategy import MarketMakingStrategy
 from config.constants import (
     LOOP_INTERVAL_SEC,
     HEALTH_CHECK_INTERVAL_SEC,
@@ -283,6 +284,14 @@ class PolymarketBot:
             )
             self.strategies.append(arb_strategy)
             
+            # Initialize market making strategy (runs in parallel with arbitrage)
+            market_making_strategy = MarketMakingStrategy(
+                self.client,
+                self.order_manager
+            )
+            self.strategies.append(market_making_strategy)
+            logger.info("✅ Market Making Strategy initialized (runs parallel with arbitrage)")
+            
             # UPGRADE 2: Initialize Web3 for NegRisk adapter interactions
             try:
                 rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
@@ -348,10 +357,10 @@ class PolymarketBot:
         self.current_balance = self.initial_balance
 
         logger.info("=" * 80)
-        logger.info("Starting Polymarket Arbitrage Bot")
+        logger.info("Starting Polymarket Multi-Strategy Bot")
         logger.info(f"Wallet Address: {self.client.wallet_address}")
         logger.info(f"Initial Balance: ${self.initial_balance:.2f} USDC")
-        logger.info(f"Active Strategies: {len(self.strategies)}")
+        logger.info(f"Active Strategies: {len(self.strategies)} (Arbitrage + Market Making)")
         logger.info(f"Maker-First Execution: {'ENABLED ✅' if ENABLE_POST_ONLY_ORDERS else 'DISABLED'}")
         logger.info(f"Drawdown Limit: ${DRAWDOWN_LIMIT_USD:.2f} (Kill Switch)")
         logger.info("=" * 80)
@@ -367,6 +376,10 @@ class PolymarketBot:
             # Run arbitrage scanning loop in background
             scan_task = asyncio.create_task(self._arbitrage_scan_loop())
             tasks.append(scan_task)
+            
+            # Run market making strategy in parallel
+            market_making_task = asyncio.create_task(self._market_making_loop())
+            tasks.append(market_making_task)
 
             # Start production monitoring tasks (2026 safety features)
             heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -2455,6 +2468,31 @@ class PolymarketBot:
             except Exception as e:
                 logger.error(f"[SCAN] Error in arbitrage scan loop: {e}", exc_info=True)
                 await asyncio.sleep(5)  # Brief pause on error
+    
+    async def _market_making_loop(self) -> None:
+        """
+        Market Making Strategy Loop (runs in parallel with arbitrage)
+        
+        Provides liquidity to earn spreads and maker rebates.
+        Operates independently with dedicated capital allocation.
+        """
+        logger.info("[MM] Market making loop started")
+        
+        # Get market making strategy (should be second in list)
+        mm_strategy = None
+        for strategy in self.strategies:
+            if hasattr(strategy, '__class__') and strategy.__class__.__name__ == 'MarketMakingStrategy':
+                mm_strategy = strategy
+                break
+        
+        if not mm_strategy:
+            logger.warning("[MM] MarketMakingStrategy not found - skipping market making")
+            return
+        
+        try:
+            await mm_strategy.run()
+        except Exception as e:
+            logger.error(f"[MM] Error in market making loop: {e}", exc_info=True)
 
     async def _heartbeat_loop(self) -> None:
         """
