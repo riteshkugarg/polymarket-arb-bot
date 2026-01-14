@@ -352,18 +352,67 @@ class MarketMakingStrategy(BaseStrategy):
         await self._place_quotes(market_id)
     
     async def _update_quotes(self) -> None:
-        """Update quotes for all active positions"""
+        """Update quotes for all active positions (parallel execution)"""
         current_time = time.time()
         
+        # Collect markets that need updates
+        markets_to_update = []
         for market_id in list(self._positions.keys()):
             last_update = self._last_quote_update.get(market_id, 0)
-            
             if current_time - last_update >= MM_QUOTE_UPDATE_INTERVAL:
-                await self._refresh_quotes(market_id)
-                self._last_quote_update[market_id] = current_time
+                markets_to_update.append(market_id)
+        
+        # Update all markets in parallel (lower latency)
+        if markets_to_update:
+            await asyncio.gather(
+                *[self._refresh_quotes(m_id) for m_id in markets_to_update],
+                return_exceptions=True
+            )
+            for m_id in markets_to_update:
+                self._last_quote_update[m_id] = current_time
+    
+    async def _reconcile_order(self, token_id: str, side: str, target_price: float, 
+                              target_size: float, current_order_id: Optional[str], 
+                              position: MarketPosition) -> Optional[str]:
+        """Smart order reconciliation - preserves queue priority"""
+        # Check if existing order is close enough (within 1 tick)
+        if current_order_id:
+            try:
+                curr_order = await self.order_manager.get_order(current_order_id)
+                if curr_order and curr_order.get('status') == 'open':
+                    curr_price = float(curr_order['price'])
+                    if abs(curr_price - target_price) < 0.001:
+                        logger.debug(f"[MM] Preserving {side} queue priority at {curr_price:.4f}")
+                        return current_order_id
+            except:
+                pass
+        
+        # Need to update - cancel old
+        if current_order_id:
+            try:
+                await self.client.cancel_order(current_order_id)
+            except:
+                pass
+        
+        # Place new order
+        try:
+            new_order = await self.order_manager.execute_limit_order(
+                token_id=token_id,
+                side=side,
+                price=target_price,
+                size=target_size,
+                post_only=True
+            )
+            if new_order and new_order.get('order_id'):
+                logger.info(f"[MM] {side} updated: {token_id[:8]}... @{target_price:.4f}")
+                return new_order['order_id']
+        except Exception as e:
+            logger.warning(f"Failed to place {side}: {e}")
+        
+        return None
     
     async def _place_quotes(self, market_id: str) -> None:
-        """Place bid/ask quotes"""
+        """Place/update quotes using inventory-aware skewing"""
         if time.time() - self._last_order_time < MM_MIN_ORDER_SPACING:
             await asyncio.sleep(MM_MIN_ORDER_SPACING)
         
@@ -379,76 +428,92 @@ class MarketMakingStrategy(BaseStrategy):
                 continue
             
             inventory = position.inventory.get(token_id, 0)
-            spread = self._calculate_spread(inventory)
             
-            bid_price = max(0.01, mid_price - spread / 2)
-            ask_price = min(0.99, mid_price + spread / 2)
+            # Calculate skewed quotes (Avellaneda-Stoikov)
+            target_bid, target_ask = self._calculate_skewed_quotes(mid_price, inventory)
             
-            try:
-                bid_size = MM_BASE_POSITION_SIZE / bid_price
-                bid_order = await self.order_manager.execute_limit_order(
-                    token_id=token_id,
-                    side='BUY',
-                    size=bid_size,
-                    price=bid_price,
-                    post_only=True
-                )
-                
-                if bid_order and bid_order.get('order_id'):
-                    position.active_bids[token_id] = bid_order['order_id']
-                
-                ask_size = MM_BASE_POSITION_SIZE / ask_price
-                ask_order = await self.order_manager.execute_limit_order(
-                    token_id=token_id,
-                    side='SELL',
-                    size=ask_size,
-                    price=ask_price,
-                    post_only=True
-                )
-                
-                if ask_order and ask_order.get('order_id'):
-                    position.active_asks[token_id] = ask_order['order_id']
-                
-                logger.debug(
-                    f"Quotes placed: {token_id[:8]}... "
-                    f"BID={bid_price:.3f} ASK={ask_price:.3f} spread={spread:.3f}"
-                )
-                
-            except Exception as e:
-                logger.warning(f"Error placing quotes for {token_id[:8]}...: {e}")
+            # Position sizing
+            bid_size = MM_BASE_POSITION_SIZE / target_bid if target_bid > 0 else 0
+            ask_size = MM_BASE_POSITION_SIZE / target_ask if target_ask > 0 else 0
+            
+            # Reduce size when holding inventory
+            if inventory > 0:
+                bid_size *= 0.5
+            elif inventory < 0:
+                ask_size *= 0.5
+            
+            # Smart reconciliation for BID
+            current_bid_id = position.active_bids.get(token_id)
+            new_bid_id = await self._reconcile_order(
+                token_id, 'BUY', target_bid, bid_size, current_bid_id, position
+            )
+            if new_bid_id:
+                position.active_bids[token_id] = new_bid_id
+            elif current_bid_id:
+                position.active_bids.pop(token_id, None)
+            
+            # Smart reconciliation for ASK
+            current_ask_id = position.active_asks.get(token_id)
+            new_ask_id = await self._reconcile_order(
+                token_id, 'SELL', target_ask, ask_size, current_ask_id, position
+            )
+            if new_ask_id:
+                position.active_asks[token_id] = new_ask_id
+            elif current_ask_id:
+                position.active_asks.pop(token_id, None)
         
         self._last_order_time = time.time()
     
     async def _refresh_quotes(self, market_id: str) -> None:
-        """Cancel old quotes and place new ones"""
-        position = self._positions.get(market_id)
-        if not position:
-            return
-        
-        all_orders = list(position.active_bids.values()) + list(position.active_asks.values())
-        for order_id in all_orders:
-            try:
-                await self.client.cancel_order(order_id)
-            except:
-                pass
-        
-        position.active_bids.clear()
-        position.active_asks.clear()
-        
+        """Update quotes (uses smart reconciliation, not blind cancel)"""
         await self._place_quotes(market_id)
     
-    def _calculate_spread(self, inventory: int) -> float:
-        """Calculate spread based on inventory"""
-        base_spread = MM_TARGET_SPREAD
+    def _calculate_micro_price(self, bids: list, asks: list) -> Optional[float]:
+        """Volume-Weighted Micro-Price (VWMP) - protects against adverse selection"""
+        if not bids or not asks:
+            return None
         
-        if abs(inventory) > MM_MAX_INVENTORY_PER_OUTCOME / 2:
-            inventory_factor = abs(inventory) / MM_MAX_INVENTORY_PER_OUTCOME
-            base_spread *= (1 + inventory_factor * MM_INVENTORY_SPREAD_MULTIPLIER)
+        best_bid = float(bids[0]['price'])
+        best_ask = float(asks[0]['price'])
+        bid_vol = float(bids[0]['size'])
+        ask_vol = float(asks[0]['size'])
         
-        return max(MM_MIN_SPREAD, min(MM_MAX_SPREAD, base_spread))
+        total_vol = bid_vol + ask_vol
+        if total_vol == 0:
+            return (best_bid + best_ask) / 2.0
+        
+        # Heavier side pushes price toward opposite side
+        micro_price = ((bid_vol * best_ask) + (ask_vol * best_bid)) / total_vol
+        return micro_price
+    
+    def _calculate_skewed_quotes(self, mid_price: float, inventory: int) -> Tuple[float, float]:
+        """Avellaneda-Stoikov inventory skewing for passive position management"""
+        RISK_FACTOR = 0.05  # 5 cents per 100 shares
+        
+        # Reservation price (indifference price)
+        inventory_skew = inventory * RISK_FACTOR
+        reservation_price = mid_price - inventory_skew
+        
+        # Dynamic spread: widen as inventory grows
+        base_half_spread = MM_TARGET_SPREAD / 2
+        extra_spread = abs(inventory) * 0.001
+        final_half_spread = base_half_spread + extra_spread
+        
+        target_bid = reservation_price - final_half_spread
+        target_ask = reservation_price + final_half_spread
+        
+        # Don't cross the market
+        target_bid = min(target_bid, mid_price - 0.001)
+        target_ask = max(target_ask, mid_price + 0.001)
+        
+        # Valid range
+        target_bid = max(0.01, min(0.99, target_bid))
+        target_ask = max(0.01, min(0.99, target_ask))
+        
+        return round(target_bid, 4), round(target_ask, 4)
     
     async def _get_market_prices(self, market_id: str, token_ids: List[str]) -> Dict[str, float]:
-        """Get current mid prices"""
+        """Get current micro-prices (volume-weighted)"""
         prices = {}
         
         for token_id in token_ids:
@@ -458,9 +523,9 @@ class MarketMakingStrategy(BaseStrategy):
                 asks = getattr(order_book, 'asks', [])
                 
                 if bids and asks:
-                    best_bid = float(bids[0]['price'])
-                    best_ask = float(asks[0]['price'])
-                    prices[token_id] = (best_bid + best_ask) / 2.0
+                    micro_price = self._calculate_micro_price(bids, asks)
+                    if micro_price:
+                        prices[token_id] = micro_price
                     
             except Exception as e:
                 logger.debug(f"Error fetching price for {token_id[:8]}...: {e}")
@@ -468,31 +533,35 @@ class MarketMakingStrategy(BaseStrategy):
         return prices
     
     async def _check_risk_limits(self) -> None:
-        """Check risk limits for all positions"""
+        """Check risk limits - use passive unwinding instead of market orders"""
         for market_id, position in list(self._positions.items()):
             prices = await self._get_market_prices(market_id, position.token_ids)
             if not prices:
                 continue
             
+            # Hard P&L stop - still force close if catastrophic
             total_pnl = position.get_total_pnl(prices)
             if total_pnl < -MM_MAX_LOSS_PER_POSITION:
-                logger.warning(
-                    f"Max loss exceeded for {market_id[:8]}... "
-                    f"(P&L: ${total_pnl:.2f}) - force closing"
+                logger.critical(
+                    f"Max loss exceeded: {market_id[:8]}... "
+                    f"(P&L: ${total_pnl:.2f}) - emergency close"
                 )
                 await self._close_position(market_id)
                 continue
             
+            # Time-based: PASSIVE UNWINDING (not force close)
             if position.has_inventory():
                 age = position.get_inventory_age()
                 if age > MM_MAX_INVENTORY_HOLD_TIME:
                     logger.warning(
-                        f"Inventory age exceeded for {market_id[:8]}... "
-                        f"({age/60:.0f} min) - force closing"
+                        f"Inventory age {age/60:.0f}min - passive unwinding"
                     )
-                    await self._close_position(market_id)
+                    for token_id, inventory in position.inventory.items():
+                        if inventory != 0:
+                            await self._exit_inventory(market_id, token_id, inventory)
                     continue
             
+            # Adverse price move: PASSIVE UNWINDING
             for token_id, inventory in position.inventory.items():
                 if inventory > 0:
                     entry_price = position.cost_basis[token_id]
@@ -501,10 +570,10 @@ class MarketMakingStrategy(BaseStrategy):
                     
                     if price_move < -MM_EMERGENCY_EXIT_THRESHOLD:
                         logger.critical(
-                            f"Emergency exit triggered: {token_id[:8]}... "
-                            f"price moved {price_move*100:.1f}% against position"
+                            f"Emergency: {token_id[:8]}... price moved {price_move*100:.1f}% "
+                            f"- passive unwinding"
                         )
-                        await self._emergency_exit_token(market_id, token_id)
+                        await self._exit_inventory(market_id, token_id, inventory)
     
     async def _should_close_position(self, position: MarketPosition) -> bool:
         """Check if position should be closed"""
@@ -542,20 +611,62 @@ class MarketMakingStrategy(BaseStrategy):
         del self._positions[market_id]
     
     async def _exit_inventory(self, market_id: str, token_id: str, shares: int) -> None:
-        """Exit inventory position at market"""
+        """Passive unwinding via aggressive quote skewing (no market orders)"""
         try:
-            result = await self.order_manager.execute_market_order(
-                token_id=token_id,
-                side='SELL',
-                size=shares,
-                max_slippage=0.05
-            )
+            position = self._positions.get(market_id)
+            if not position:
+                return
             
-            if result:
-                logger.info(f"Exited {shares} shares of {token_id[:8]}...")
+            inventory = position.inventory.get(token_id, 0)
+            if inventory == 0:
+                return
+            
+            logger.warning(f"[MM] Passively unwinding {abs(inventory)} shares")
+            
+            # Get current price
+            prices = await self._get_market_prices(market_id, [token_id])
+            if not prices or token_id not in prices:
+                return
+            
+            mid_price = prices[token_id]
+            
+            # Aggressive skewing (10x normal risk factor)
+            AGGRESSIVE_RISK = 0.5
+            inventory_skew = inventory * AGGRESSIVE_RISK
+            
+            if inventory > 0:
+                # Long: aggressive seller (ASK below mid)
+                target_ask = mid_price - (abs(inventory_skew) * 0.5)
+                target_ask = max(0.01, min(0.99, target_ask))
+                target_bid = max(0.01, target_ask - 0.10)
+            else:
+                # Short: aggressive buyer (BID above mid)
+                target_bid = mid_price + (abs(inventory_skew) * 0.5)
+                target_bid = max(0.01, min(0.99, target_bid))
+                target_ask = min(0.99, target_bid + 0.10)
+            
+            # Place aggressive quotes
+            bid_size = MM_BASE_POSITION_SIZE / target_bid
+            ask_size = MM_BASE_POSITION_SIZE / target_ask
+            
+            current_bid_id = position.active_bids.get(token_id)
+            new_bid_id = await self._reconcile_order(
+                token_id, 'BUY', target_bid, bid_size, current_bid_id, position
+            )
+            if new_bid_id:
+                position.active_bids[token_id] = new_bid_id
+            
+            current_ask_id = position.active_asks.get(token_id)
+            new_ask_id = await self._reconcile_order(
+                token_id, 'SELL', target_ask, ask_size, current_ask_id, position
+            )
+            if new_ask_id:
+                position.active_asks[token_id] = new_ask_id
+            
+            logger.info(f"[MM] Unwinding quotes: BID={target_bid:.4f} ASK={target_ask:.4f}")
                 
         except Exception as e:
-            logger.error(f"Error exiting inventory: {e}")
+            logger.error(f"Passive unwinding error: {e}")
     
     async def _emergency_exit_token(self, market_id: str, token_id: str) -> None:
         """Emergency exit for specific token"""
