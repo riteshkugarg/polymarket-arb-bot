@@ -211,12 +211,22 @@ class ArbScanner:
             
             logger.debug(f"Scanning {len(markets)} markets for arbitrage opportunities")
             
+            # Track best near-miss for diagnostic logging
+            best_near_miss = None
+            best_sum = 1.0
+            
             # Scan each market for arbitrage
             for market in markets:
                 try:
                     arb_opp = await self._check_market_for_arbitrage(market)
                     if arb_opp:
                         opportunities.append(arb_opp)
+                    else:
+                        # Track closest opportunity even if not executable
+                        market_sum = self._get_market_sum_prices(market)
+                        if market_sum and FINAL_THRESHOLD <= market_sum < best_sum:
+                            best_sum = market_sum
+                            best_near_miss = market.get('question', 'Unknown')[:60]
                 except Exception as e:
                     logger.debug(f"Error scanning market: {e}")
                     continue
@@ -233,11 +243,40 @@ class ArbScanner:
                 f"(threshold: sum < {FINAL_THRESHOLD})"
             )
             
+            # Log closest near-miss for market insight
+            if not opportunities and best_near_miss:
+                logger.info(
+                    f"  Closest opportunity: sum={best_sum:.4f} "
+                    f"(need {FINAL_THRESHOLD:.2f}) - {best_near_miss}"
+                )
+            
             return opportunities
             
         except Exception as e:
             logger.error(f"Market scan failed: {e}")
             return []
+
+    def _get_market_sum_prices(self, market: Dict[str, Any]) -> Optional[float]:
+        """
+        Quick check for market sum of mid prices (for near-miss logging)
+        
+        Returns sum of mid prices if available, None otherwise
+        """
+        try:
+            tokens = market.get('tokens', [])
+            if len(tokens) < 3:
+                return None
+            
+            total = 0.0
+            for token in tokens:
+                best_bid = float(token.get('price', 0))
+                best_ask = float(token.get('price', 0))  # Using same for quick check
+                mid = (best_bid + best_ask) / 2.0 if best_bid and best_ask else best_bid
+                total += mid
+            
+            return total if total > 0 else None
+        except:
+            return None
 
     async def _get_cached_order_book(self, token_id: str):
         """
