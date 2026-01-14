@@ -370,13 +370,14 @@ class PolymarketBot:
             # Start production monitoring tasks (2026 safety features)
             heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             auto_redeem_task = asyncio.create_task(self._auto_redeem_loop())
-            merge_positions_task = asyncio.create_task(self._merge_positions_loop())  # MERGE ENGINE
+            # DISABLED: NegRisk merge feature not fully implemented
+            # merge_positions_task = asyncio.create_task(self._merge_positions_loop())  # MERGE ENGINE
             delayed_order_task = asyncio.create_task(self._delayed_order_observer_loop())  # RELIABILITY FIX 2
             order_heartbeat_task = asyncio.create_task(self._order_heartbeat_loop())  # UPGRADE 3
             state_persistence_task = asyncio.create_task(self._state_persistence_loop())  # UPGRADE 5
             health_check_task = asyncio.create_task(self._health_check_loop())
             shutdown_task = asyncio.create_task(self._wait_for_shutdown())
-            tasks.extend([heartbeat_task, auto_redeem_task, merge_positions_task, delayed_order_task, order_heartbeat_task, state_persistence_task, health_check_task, shutdown_task])
+            tasks.extend([heartbeat_task, auto_redeem_task, delayed_order_task, order_heartbeat_task, state_persistence_task, health_check_task, shutdown_task])
 
             # Wait for shutdown or error
             done, pending = await asyncio.wait(
@@ -1124,7 +1125,10 @@ class PolymarketBot:
                                 f"{condition_id[:8]} → ${min_size:.2f} USDC"
                             )
                             
-                            # TODO: Implement actual NegRiskAdapter.merge() contract call
+                            # PRODUCTION NOTE: NegRisk merge requires contract call implementation
+                            # This feature is DISABLED in production until fully implemented
+                            # To enable: Implement NegRiskAdapter.merge() using RelayClient
+                            # Example code:
                             # adapter = self._web3.eth.contract(
                             #     address=NEGRISK_ADAPTER_ADDRESS,
                             #     abi=NEGRISK_ADAPTER_ABI
@@ -1133,6 +1137,11 @@ class PolymarketBot:
                             #     condition_id,
                             #     int(min_size * 1e6)  # Convert to wei
                             # ).build_transaction({...})
+                            
+                            logger.warning(
+                                f"[CONVERT] ⚠️  Merge detected but NOT executed "
+                                f"(feature disabled - implement NegRiskAdapter.merge())"
+                            )
                             
                             conversions_performed = True
                 
