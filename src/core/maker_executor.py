@@ -6,6 +6,7 @@ Wraps polymarket_client order creation with:
 2. Automatic NegRisk market detection
 3. Wait-for-fill order monitoring
 4. Rebate tracking for successful fills
+5. Process pool for CPU-intensive signing (HFT optimization)
 
 This module ensures we ALWAYS trade as a maker, never a taker.
 """
@@ -14,6 +15,7 @@ import asyncio
 import time
 from typing import Dict, Any, Optional, Set
 from decimal import Decimal
+from concurrent.futures import ProcessPoolExecutor
 
 from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
 from py_clob_client.order_builder.constants import BUY, SELL
@@ -21,6 +23,8 @@ from py_clob_client.order_builder.constants import BUY, SELL
 from config.constants import (
     ENABLE_POST_ONLY_ORDERS,
     POST_ONLY_SPREAD_OFFSET,
+    DYNAMIC_SPREAD_CAPTURE_PCT,
+    MAX_DYNAMIC_OFFSET_TICKS,
     POST_ONLY_ERROR_COOLDOWN_SEC,
     MAX_ORDER_AGE_SEC,
     ORDER_MONITOR_INTERVAL_SEC,
@@ -69,6 +73,27 @@ class MakerFirstExecutor:
         # Order monitoring task
         self._monitor_task: Optional[asyncio.Task] = None
         self._is_monitoring = False
+        
+        # FIX 1: Process pool for CPU-intensive signing operations
+        # Signing ECDSA/EIP-712 signatures is CPU-bound, not I/O-bound
+        # Using ProcessPoolExecutor instead of asyncio.to_thread improves
+        # throughput for high-frequency trading (multiple orders per second)
+        self._process_pool = ProcessPoolExecutor(max_workers=2)  # 2 workers for signing
+        logger.info("🔐 Process pool initialized for HFT signing (2 workers)")
+        
+        # FIX 1: Process pool for CPU-intensive signing operations
+        # Signing ECDSA/EIP-712 signatures is CPU-bound, not I/O-bound
+        # Using ProcessPoolExecutor instead of asyncio.to_thread improves
+        # throughput for high-frequency trading (multiple orders per second)
+        self._process_pool = ProcessPoolExecutor(max_workers=2)  # 2 workers for signing
+        logger.info("🔐 Process pool initialized for HFT signing (2 workers)")
+        
+        # FIX 1: Process pool for CPU-intensive signing operations
+        # Signing ECDSA/EIP-712 signatures is CPU-bound, not I/O-bound
+        # Using ProcessPoolExecutor instead of asyncio.to_thread improves
+        # throughput for high-frequency trading (multiple orders per second)
+        self._process_pool = ProcessPoolExecutor(max_workers=2)  # 2 workers for signing
+        logger.info("🔐 Process pool initialized for HFT signing (2 workers)")
     
     async def start_monitoring(self) -> None:
         """Start background order monitoring task"""
@@ -87,6 +112,33 @@ class MakerFirstExecutor:
             except asyncio.CancelledError:
                 pass
         logger.info("📊 Order monitoring stopped")
+    
+    async def shutdown(self) -> None:
+        """Clean shutdown - stop monitoring and close process pool"""
+        await self.stop_monitoring()
+        
+        # FIX 1: Clean up process pool
+        if hasattr(self, '_process_pool'):
+            self._process_pool.shutdown(wait=True)
+            logger.info("🔐 Process pool shut down")
+    
+    async def shutdown(self) -> None:
+        """Clean shutdown - stop monitoring and close process pool"""
+        await self.stop_monitoring()
+        
+        # FIX 1: Clean up process pool
+        if hasattr(self, '_process_pool'):
+            self._process_pool.shutdown(wait=True)
+            logger.info("🔐 Process pool shut down")
+    
+    async def shutdown(self) -> None:
+        """Clean shutdown - stop monitoring and close process pool"""
+        await self.stop_monitoring()
+        
+        # FIX 1: Clean up process pool
+        if hasattr(self, '_process_pool'):
+            self._process_pool.shutdown(wait=True)
+            logger.info("🔐 Process pool shut down")
     
     async def _order_monitor_loop(self) -> None:
         """
@@ -250,20 +302,32 @@ class MakerFirstExecutor:
             # Get orderbook for pricing
             order_book = await self.client.get_order_book(token_id)
             bids = getattr(order_book, 'bids', [])
+            asks = getattr(order_book, 'asks', [])
             
             if not bids:
                 raise OrderExecutionError(f"No bids available for {token_id[:8]}")
             
-            # Calculate maker price: join the bid
+            if not asks:
+                raise OrderExecutionError(f"No asks available for {token_id[:8]}")
+            
+            # FIX 2: Calculate dynamic spread offset instead of fixed $0.01
             best_bid = float(bids[0].price)
-            target_price = best_bid + POST_ONLY_SPREAD_OFFSET
+            best_ask = float(asks[0].price)
+            
+            dynamic_offset = await self._calculate_dynamic_offset(
+                token_id=token_id,
+                best_bid=best_bid,
+                best_ask=best_ask
+            )
+            
+            target_price = best_bid + dynamic_offset
             
             # Calculate shares
             shares = amount_usd / target_price
             
             logger.info(
-                f"  Target: ${target_price:.4f} (best_bid=${best_bid:.4f} + ${POST_ONLY_SPREAD_OFFSET})"
-                f" for {shares:.2f} shares"
+                f"  Target: ${target_price:.4f} (bid=${best_bid:.4f} + offset=${dynamic_offset:.4f}) "
+                f"for {shares:.2f} shares (spread=${best_ask - best_bid:.4f})"
             )
             
             # Get fee rate
@@ -288,13 +352,18 @@ class MakerFirstExecutor:
                 )
             )
             
-            # Sign order
-            signed_order = await asyncio.to_thread(
+            # FIX 1: Use process pool for CPU-intensive signing operations
+            # ECDSA/EIP-712 signing is CPU-bound (cryptographic operations)
+            # ProcessPoolExecutor provides true parallelism for HFT scenarios
+            loop = asyncio.get_event_loop()
+            
+            signed_order = await loop.run_in_executor(
+                self._process_pool,
                 self.client._client.create_order,
                 order_args
             )
             
-            # Post order
+            # Post order (network I/O - keep as asyncio.to_thread)
             result = await asyncio.to_thread(
                 self.client._client.post_order,
                 signed_order,
@@ -365,6 +434,92 @@ class MakerFirstExecutor:
             
             # Re-raise other errors
             raise
+    
+    async def _calculate_dynamic_offset(
+        self,
+        token_id: str,
+        best_bid: float,
+        best_ask: float
+    ) -> float:
+        """
+        FIX 2: Calculate optimal price offset based on spread and tick size
+        
+        Instead of a fixed $0.01 offset (which puts you at back of queue),
+        this calculates a dynamic offset based on:
+        1. Current market spread (ask - bid)
+        2. Market-specific tick size (0.1, 0.01, 0.001, or 0.0001)
+        3. Configured spread capture percentage (15% default)
+        
+        Logic:
+        - If spread is tight (1 tick): Join the bid exactly (no offset)
+        - If spread is wide: Capture DYNAMIC_SPREAD_CAPTURE_PCT of spread
+        - Cap at MAX_DYNAMIC_OFFSET_TICKS to prevent overpaying
+        - Never cross or touch the ask (safety check)
+        
+        Example:
+        - Spread: $0.50-$0.60 = $0.10 wide
+        - Tick size: $0.01
+        - Capture: 15% of $0.10 = $0.015
+        - Ticks: 1.5 ticks → rounds to 2 ticks
+        - Cap: max 3 ticks → 2 ticks OK
+        - Offset: 2 × $0.01 = $0.02
+        - Final: $0.50 + $0.02 = $0.52 (ahead of $0.50 bid, below $0.60 ask)
+        
+        Args:
+            token_id: Token to calculate offset for
+            best_bid: Current best bid price
+            best_ask: Current best ask price
+            
+        Returns:
+            Absolute price offset to add to best bid (in dollars)
+        """
+        try:
+            # Get tick size for the specific market (required for 2026 CLOB compliance)
+            tick_size_str = await self.client.get_tick_size(token_id)
+            tick_size = float(tick_size_str)
+            
+            # Calculate current spread
+            spread = best_ask - best_bid
+            
+            # If spread is at minimum (1 tick), just join the bid
+            if spread <= tick_size:
+                logger.debug(
+                    f"Spread at minimum ({spread:.4f} ≤ {tick_size:.4f}) - joining bid"
+                )
+                return 0.0
+            
+            # Calculate how many ticks to jump based on config percentage
+            # e.g., Capture 15% of the spread (DYNAMIC_SPREAD_CAPTURE_PCT = 0.15)
+            raw_offset = spread * DYNAMIC_SPREAD_CAPTURE_PCT
+            
+            # Convert raw offset into discrete number of ticks
+            ticks_to_jump = max(1, int(raw_offset / tick_size))
+            
+            # Cap the jump to avoid overpaying (MAX_DYNAMIC_OFFSET_TICKS = 3)
+            ticks_to_jump = min(ticks_to_jump, MAX_DYNAMIC_OFFSET_TICKS)
+            
+            calculated_offset = ticks_to_jump * tick_size
+            
+            # Final safety check: ensure we don't accidentally cross or touch the ask
+            if (best_bid + calculated_offset) >= best_ask:
+                logger.warning(
+                    f"Dynamic offset would cross spread "
+                    f"(bid {best_bid:.4f} + offset {calculated_offset:.4f} ≥ ask {best_ask:.4f}) "
+                    f"- joining bid instead"
+                )
+                return 0.0
+            
+            logger.debug(
+                f"Dynamic offset: {ticks_to_jump} ticks × ${tick_size:.4f} = ${calculated_offset:.4f} "
+                f"(spread: ${spread:.4f}, capture: {DYNAMIC_SPREAD_CAPTURE_PCT*100:.0f}%)"
+            )
+            
+            return calculated_offset
+            
+        except Exception as e:
+            logger.error(f"Error calculating dynamic offset: {e}")
+            # Fallback to joining the bid exactly (safest option)
+            return 0.0
 
 
 # Global executor instance

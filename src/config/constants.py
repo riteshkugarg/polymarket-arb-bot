@@ -386,7 +386,17 @@ SECRET_KEYS = {
 # Ensures we always provide liquidity and prepare for maker rebates
 ENABLE_POST_ONLY_ORDERS: Final[bool] = True
 
-# Post-only spread offset (dollars)
+# FIX 2: Dynamic spread offset configuration
+# Instead of fixed $0.01, calculate offset based on current spread
+# Capture this percentage of the spread for optimal queue position
+# Example: 15% of $0.10 spread = $0.015 offset (1.5 ticks)
+DYNAMIC_SPREAD_CAPTURE_PCT: Final[float] = 0.15  # 15% of spread
+
+# Maximum ticks to jump above best bid (prevents overpaying)
+# Caps offset even in wide spreads (e.g., max 3 × $0.01 = $0.03)
+MAX_DYNAMIC_OFFSET_TICKS: Final[int] = 3
+
+# Post-only spread offset (dollars) - LEGACY fallback only
 # Target_Price = Best_Bid + OFFSET (for BUY orders)
 # This ensures we "join the bid" rather than "hit the ask"
 POST_ONLY_SPREAD_OFFSET: Final[float] = 0.01
