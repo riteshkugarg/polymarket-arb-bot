@@ -12,6 +12,7 @@ from config.constants import (
     MAX_SLIPPAGE_PERCENT,
     MAX_POSITION_SIZE_USD,
     ENTRY_PRICE_GUARD,
+    MM_GLOBAL_DAILY_LOSS_LIMIT,  # Circuit breaker protection
 )
 from core.polymarket_client import PolymarketClient
 from utils.logger import get_logger, log_trade_event
@@ -59,10 +60,17 @@ class OrderManager:
         self._max_consecutive_failures = 5
         self._circuit_breaker_active = False
         
+        # PRODUCTION SAFETY: Daily loss tracking (strategy-agnostic)
+        self._mm_daily_realized_pnl = Decimal('0')  # Market making strategy P&L
+        self._daily_loss_limit = Decimal(str(MM_GLOBAL_DAILY_LOSS_LIMIT))
+        from datetime import datetime
+        self._daily_reset_time = datetime.now()
+        
         logger.info(
             f"OrderManager initialized - "
             f"Max position: ${MAX_POSITION_SIZE_USD}, "
-            f"Circuit breaker threshold: {self._max_consecutive_failures}"
+            f"Circuit breaker threshold: {self._max_consecutive_failures}, "
+            f"Daily loss limit: ${MM_GLOBAL_DAILY_LOSS_LIMIT}"
         )
 
     async def validate_order(
@@ -104,6 +112,14 @@ class OrderManager:
             raise ValidationError(
                 f"Circuit breaker active due to {self._consecutive_failures} consecutive failures. "
                 f"Manual intervention required."
+            )
+        
+        # PRODUCTION SAFETY: Daily loss limit check (OrderManager-level enforcement)
+        # Prevents logic errors in strategy from exceeding risk limits
+        if self._mm_daily_realized_pnl < -self._daily_loss_limit:
+            raise ValidationError(
+                f"🚨 DAILY LOSS LIMIT EXCEEDED: ${float(self._mm_daily_realized_pnl):.2f} "
+                f"< -${float(self._daily_loss_limit):.2f} - ALL TRADING HALTED"
             )
         
         # Check minimum order size removed - allow proportional sizing
@@ -393,9 +409,49 @@ class OrderManager:
         return calculate_position_size(
             available_balance=float(balance),
             target_size=target_size,
-            min_order_size=min_size or 0.0,  # No minimum - proportional sizing only
-            max_position_size=max_size or MAX_POSITION_SIZE_USD
+            min_size=min_size,
+            max_size=max_size
         )
+    
+    def record_mm_pnl(self, realized_pnl: float) -> None:
+        """
+        PRODUCTION SAFETY: Record realized P&L from market making fills
+        
+        Called by MarketMakingStrategy when positions close to track actual losses.
+        Enforces daily loss limit at OrderManager level (not just strategy level).
+        
+        Args:
+            realized_pnl: Profit (positive) or loss (negative) from closed position
+        """
+        from datetime import datetime
+        
+        # Reset daily P&L at midnight
+        now = datetime.now()
+        if now.date() > self._daily_reset_time.date():
+            logger.info(f"OrderManager daily P&L reset: Previous day ${float(self._mm_daily_realized_pnl):.2f}")
+            self._mm_daily_realized_pnl = Decimal('0')
+            self._daily_reset_time = now
+        
+        # Update daily P&L
+        self._mm_daily_realized_pnl += Decimal(str(realized_pnl))
+        
+        # Log significant losses
+        if realized_pnl < -5.0:
+            logger.warning(
+                f"⚠️ Market Making Loss: ${realized_pnl:.2f} - "
+                f"Daily P&L: ${float(self._mm_daily_realized_pnl):.2f} / -${float(self._daily_loss_limit):.2f}"
+            )
+        
+        # Critical warning if approaching limit
+        if self._mm_daily_realized_pnl < -self._daily_loss_limit * Decimal('0.8'):
+            logger.critical(
+                f"🚨 APPROACHING DAILY LOSS LIMIT: ${float(self._mm_daily_realized_pnl):.2f} "
+                f"(80% of -${float(self._daily_loss_limit):.2f} limit) - REDUCE RISK"
+            )
+    
+    def get_mm_daily_pnl(self) -> float:
+        """Get current market making daily P&L (for monitoring)"""
+        return float(self._mm_daily_realized_pnl)
 
     def get_daily_volume(self) -> Decimal:
         """Get total daily trading volume"""

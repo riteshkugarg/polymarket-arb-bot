@@ -1612,6 +1612,16 @@ class MarketMakingStrategy(BaseStrategy):
         # Update daily P&L tracking (for circuit breaker)
         self._daily_pnl += position.realized_pnl
         
+        # PRODUCTION SAFETY: Report realized P&L to OrderManager
+        # OrderManager enforces daily loss limit at execution level (not just strategy)
+        # This prevents strategy logic errors from bypassing circuit breaker
+        if position.realized_pnl != 0:
+            self.order_manager.record_mm_pnl(position.realized_pnl)
+            logger.info(
+                f"[P&L REPORTING] Reported ${position.realized_pnl:.2f} to OrderManager - "
+                f"Daily total: ${self.order_manager.get_mm_daily_pnl():.2f}"
+            )
+        
         del self._positions[market_id]
     
     async def _exit_inventory(self, market_id: str, token_id: str, shares: int) -> None:

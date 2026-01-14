@@ -518,6 +518,9 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 # DISCOVERY MODE: $10/day (ultra-low for finding ANY active markets)
 # Per Polymarket Support: Start low, increase based on what's available
 # Previous: $50 (still too high - found 0 markets)
+#
+# PRODUCTION NOTE: If bot trades too many low-quality markets (wide spreads,
+# unprofitable fills), increase to $50-100 to filter for better liquidity
 MM_MIN_MARKET_VOLUME_24H: Final[float] = 10.0
 
 # Minimum liquidity (orderbook depth) - MORE CRITICAL THAN VOLUME
