@@ -340,6 +340,11 @@ class MarketMakingStrategy(BaseStrategy):
             f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}"
         )
     
+    @property
+    def is_running(self) -> bool:
+        """Public property for health checks to access running state"""
+        return self._is_running
+    
     async def run(self) -> None:
         """Main strategy loop"""
         if self._is_running:
