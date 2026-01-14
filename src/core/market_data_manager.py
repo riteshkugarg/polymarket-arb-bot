@@ -101,19 +101,27 @@ class FillEvent:
     
 
 # ============================================================================
-# GlobalMarketCache - Thread-Safe Shared State
+# MarketStateCache - Unified Thread-Safe Shared State (2026 HFT-Grade)
 # ============================================================================
 
-class GlobalMarketCache:
+class MarketStateCache:
     """
-    Thread-safe cache for real-time market data
+    Unified thread-safe cache for real-time market data with institutional safety guards
     
     Features:
     ---------
     - O(1) lookups via dictionary
     - Thread-safe updates with RLock
-    - Automatic stale data detection
+    - Timestamp integrity checks (reject outdated WebSocket messages)
+    - 2-second staleness detection with circuit breaker
     - Market-level staleness tracking
+    - User fills cache for instant inventory updates
+    
+    Safety Guards (Institutional-Grade):
+    ------------------------------------
+    - Timestamp Integrity: Rejects messages older than current cache state
+    - Lag Circuit Breaker: Flags markets with data >2s old
+    - Thread Safety: All operations protected by RLock
     """
     
     def __init__(self, stale_threshold_seconds: float = 2.0):
@@ -125,15 +133,45 @@ class GlobalMarketCache:
         # Market metadata cache
         self._market_info: Dict[str, Dict[str, Any]] = {}
         
-        logger.info(f"GlobalMarketCache initialized (stale threshold: {stale_threshold_seconds}s)")
+        # User fills cache (for instant inventory updates)
+        self._user_fills: Dict[str, List[FillEvent]] = {}  # asset_id -> list of fills
+        
+        logger.info(
+            f"MarketStateCache initialized (stale threshold: {stale_threshold_seconds}s) "
+            f"[HFT-Grade Timestamp Integrity ENABLED]"
+        )
     
-    def update(self, asset_id: str, snapshot: MarketSnapshot) -> None:
-        """Update cache with new market data (thread-safe)"""
+    def update(self, asset_id: str, snapshot: MarketSnapshot, force: bool = False) -> bool:
+        """
+        Update cache with new market data (thread-safe with timestamp integrity)
+        
+        Args:
+            asset_id: Asset identifier
+            snapshot: New market snapshot
+            force: Skip timestamp validation (for REST fallback)
+            
+        Returns:
+            True if update accepted, False if rejected due to stale timestamp
+        """
         with self._lock:
+            # INSTITUTIONAL SAFETY: Timestamp Integrity Check
+            # Reject WebSocket messages older than current cache state
+            if not force and asset_id in self._cache:
+                existing = self._cache[asset_id]
+                if snapshot.last_update <= existing.last_update:
+                    logger.debug(
+                        f"[TIMESTAMP_INTEGRITY] Rejected stale update for {asset_id[:8]}... "
+                        f"(incoming: {snapshot.last_update:.3f}, cached: {existing.last_update:.3f})"
+                    )
+                    return False
+            
             self._cache[asset_id] = snapshot
+            
             # Clear stale flag if data is fresh
             if asset_id in self._stale_markets:
                 self._stale_markets.remove(asset_id)
+            
+            return True
     
     def get(self, asset_id: str) -> Optional[MarketSnapshot]:
         """Get latest snapshot (synchronous, thread-safe)"""
@@ -159,14 +197,14 @@ class GlobalMarketCache:
         }
     
     def is_stale(self, asset_id: str) -> bool:
-        """Check if asset data is stale"""
+        """Check if asset data is stale (>2s old)"""
         snapshot = self.get(asset_id)
         if not snapshot:
             return True
         return snapshot.is_stale(self._stale_threshold)
     
     def get_stale_markets(self) -> Set[str]:
-        """Get all currently stale markets"""
+        """Get all currently stale markets (LAG CIRCUIT BREAKER)"""
         with self._lock:
             stale = set()
             for asset_id, snapshot in self._cache.items():
@@ -180,6 +218,7 @@ class GlobalMarketCache:
         with self._lock:
             self._cache.pop(asset_id, None)
             self._stale_markets.discard(asset_id)
+            self._user_fills.pop(asset_id, None)
     
     def get_all_assets(self) -> List[str]:
         """Get list of all cached asset IDs"""
@@ -195,6 +234,33 @@ class GlobalMarketCache:
         """Get cached market metadata"""
         with self._lock:
             return self._market_info.get(market_id)
+    
+    def add_fill_event(self, fill: FillEvent) -> None:
+        """Add user fill event to cache (for instant inventory updates)"""
+        with self._lock:
+            if fill.asset_id not in self._user_fills:
+                self._user_fills[fill.asset_id] = []
+            self._user_fills[fill.asset_id].append(fill)
+            
+            # Keep only last 100 fills per asset to prevent memory bloat
+            if len(self._user_fills[fill.asset_id]) > 100:
+                self._user_fills[fill.asset_id] = self._user_fills[fill.asset_id][-100:]
+    
+    def get_recent_fills(self, asset_id: str, max_age_seconds: float = 60.0) -> List[FillEvent]:
+        """Get recent fills for an asset (within max_age_seconds)"""
+        with self._lock:
+            if asset_id not in self._user_fills:
+                return []
+            
+            current_time = time.time()
+            return [
+                fill for fill in self._user_fills[asset_id]
+                if (current_time - fill.timestamp) <= max_age_seconds
+            ]
+
+
+# Backwards compatibility alias
+GlobalMarketCache = MarketStateCache
 
 
 # ============================================================================
@@ -320,16 +386,28 @@ class PolymarketWSManager:
             await self._handle_reconnect()
     
     async def _handle_reconnect(self) -> None:
-        """Handle reconnection with exponential backoff"""
+        """
+        Handle reconnection with exponential backoff
+        
+        INSTITUTIONAL SAFETY: Exponential backoff with state rehydration
+        - Delay = min(2^attempts, 60s)
+        - After successful reconnect, trigger REST sync before resuming trading
+        """
         self._reconnect_attempts += 1
         delay = min(2 ** self._reconnect_attempts, self._max_reconnect_delay)
         
         logger.warning(
-            f"Reconnecting in {delay}s (attempt {self._reconnect_attempts})..."
+            f"🔄 Reconnecting in {delay}s (attempt {self._reconnect_attempts})... "
+            f"[EXPONENTIAL BACKOFF]"
         )
         
         await asyncio.sleep(delay)
         await self._connect()
+        
+        # RELIABILITY: State Rehydration after reconnect
+        if self._is_connected:
+            logger.info("✅ Reconnected - Triggering state rehydration...")
+            await self._rehydrate_state()
     
     async def _heartbeat_loop(self) -> None:
         """Send PING every heartbeat_interval seconds"""
@@ -549,6 +627,81 @@ class PolymarketWSManager:
         except Exception as e:
             logger.error(f"User channel subscription error: {e}")
     
+    async def _rehydrate_state(self) -> None:
+        """
+        RELIABILITY: Rehydrate cache from REST API after reconnection
+        
+        After every successful WebSocket reconnect, we sync local cache
+        with server state via REST to ensure consistency before resuming trading.
+        
+        This prevents trading on stale data during connection outages.
+        """
+        try:
+            logger.info("[REHYDRATE] Syncing cache with REST API...")
+            
+            # Get all subscribed assets
+            assets = list(self._subscribed_assets)
+            
+            if not assets:
+                logger.debug("[REHYDRATE] No assets to sync")
+                return
+            
+            # Fetch fresh order books from REST API
+            rehydrated_count = 0
+            for asset_id in assets:
+                try:
+                    # Fetch from REST (this should call client.get_order_book)
+                    book_data = await self.client.get_order_book(asset_id)
+                    
+                    if not book_data or 'bids' not in book_data or 'asks' not in book_data:
+                        continue
+                    
+                    bids = book_data['bids']
+                    asks = book_data['asks']
+                    
+                    if not bids or not asks:
+                        continue
+                    
+                    # Create snapshot from REST data
+                    best_bid = float(bids[0]['price'])
+                    best_ask = float(asks[0]['price'])
+                    bid_size = float(bids[0]['size'])
+                    ask_size = float(asks[0]['size'])
+                    
+                    mid_price = (best_bid + best_ask) / 2.0
+                    total_vol = bid_size + ask_size
+                    micro_price = ((bid_size * best_ask) + (ask_size * best_bid)) / total_vol if total_vol > 0 else mid_price
+                    
+                    snapshot = MarketSnapshot(
+                        asset_id=asset_id,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                        bid_size=bid_size,
+                        ask_size=ask_size,
+                        mid_price=mid_price,
+                        micro_price=micro_price,
+                        last_update=time.time(),
+                        bids=bids[:10],
+                        asks=asks[:10],
+                    )
+                    
+                    # Force update (skip timestamp check since this is REST sync)
+                    self.cache.update(asset_id, snapshot, force=True)
+                    rehydrated_count += 1
+                    
+                except Exception as e:
+                    logger.warning(f"[REHYDRATE] Failed to sync {asset_id[:8]}...: {e}")
+                    continue
+            
+            logger.info(
+                f"✅ [REHYDRATE] Cache synced: {rehydrated_count}/{len(assets)} assets updated from REST"
+            )
+            
+        except Exception as e:
+            logger.error(f"[REHYDRATE] State rehydration failed: {e}", exc_info=True)
+    
+            logger.error(f"User channel subscription error: {e}")
+    
     async def _resubscribe_all(self) -> None:
         """Resubscribe to all assets after reconnection"""
         logger.info(f"Resubscribing to {len(self._subscribed_assets)} assets...")
@@ -644,3 +797,75 @@ class MarketDataManager:
     def get_market_info(self, market_id: str) -> Optional[Dict[str, Any]]:
         """Get cached market metadata"""
         return self.cache.get_market_info(market_id)
+    
+    def get_stale_markets(self) -> Set[str]:
+        """
+        Get all markets with stale data (LAG CIRCUIT BREAKER)
+        
+        Returns set of asset_ids that haven't been updated in 2+ seconds.
+        Strategies should use this to trigger emergency quote cancellation.
+        """
+        return self.cache.get_stale_markets()
+    
+    def check_market_staleness(self, asset_ids: List[str]) -> bool:
+        """
+        Check if any of the given markets are stale
+        
+        Returns True if ANY market in the list is stale (>2s old).
+        Use this before executing trades to ensure data freshness.
+        """
+        for asset_id in asset_ids:
+            if self.cache.is_stale(asset_id):
+                return True
+        return False
+    
+    async def force_refresh_from_rest(self, asset_id: str) -> bool:
+        """
+        Force refresh a single asset from REST API
+        
+        Used as fallback when WebSocket data is stale.
+        Returns True if successful.
+        """
+        try:
+            book_data = await self.client.get_order_book(asset_id)
+            
+            if not book_data or 'bids' not in book_data or 'asks' not in book_data:
+                return False
+            
+            bids = book_data['bids']
+            asks = book_data['asks']
+            
+            if not bids or not asks:
+                return False
+            
+            # Create snapshot from REST data
+            best_bid = float(bids[0]['price'])
+            best_ask = float(asks[0]['price'])
+            bid_size = float(bids[0]['size'])
+            ask_size = float(asks[0]['size'])
+            
+            mid_price = (best_bid + best_ask) / 2.0
+            total_vol = bid_size + ask_size
+            micro_price = ((bid_size * best_ask) + (ask_size * best_bid)) / total_vol if total_vol > 0 else mid_price
+            
+            snapshot = MarketSnapshot(
+                asset_id=asset_id,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                bid_size=bid_size,
+                ask_size=ask_size,
+                mid_price=mid_price,
+                micro_price=micro_price,
+                last_update=time.time(),
+                bids=bids[:10],
+                asks=asks[:10],
+            )
+            
+            # Force update
+            self.cache.update(asset_id, snapshot, force=True)
+            logger.debug(f"[REST_REFRESH] Refreshed {asset_id[:8]}... from REST API")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[REST_REFRESH] Failed to refresh {asset_id[:8]}...: {e}")
+            return False

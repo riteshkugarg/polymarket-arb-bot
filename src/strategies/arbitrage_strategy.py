@@ -109,7 +109,8 @@ class ArbitrageStrategy(BaseStrategy):
         # Market data manager for real-time WebSocket data
         self._market_data_manager = market_data_manager
         
-        self.scanner = ArbScanner(client, order_manager)
+        # Pass market_data_manager to scanner for cache access
+        self.scanner = ArbScanner(client, order_manager, market_data_manager=market_data_manager)
         self.executor = AtomicExecutor(client, order_manager)
         self.atomic_executor = atomic_executor or AtomicDepthAwareExecutor(client, order_manager)
         self.use_depth_aware_executor = atomic_executor is not None

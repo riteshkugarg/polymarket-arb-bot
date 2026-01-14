@@ -141,18 +141,29 @@ class ArbScanner:
     accounting for 1.5% taker fee buffer.
     
     Does NOT execute - only identifies opportunities for AtomicExecutor.
+    
+    2026 UPGRADE: WebSocket-driven via MarketDataManager
+    - Reads from shared MarketStateCache (sub-50ms latency)
+    - Falls back to REST only if cache is stale
     """
     
-    def __init__(self, client: PolymarketClient, order_manager: OrderManager):
+    def __init__(
+        self,
+        client: PolymarketClient,
+        order_manager: OrderManager,
+        market_data_manager: Optional[Any] = None
+    ):
         """
         Initialize arbitrage scanner
         
         Args:
             client: Polymarket CLOB client
             order_manager: Order execution manager
+            market_data_manager: Real-time market data manager (optional)
         """
         self.client = client
         self.order_manager = order_manager
+        self.market_data_manager = market_data_manager  # WebSocket data source
         self._cache: Dict[str, Dict] = {}  # Market data cache
         self._last_scan_time = 0
         self._scan_interval = 5  # Seconds between full scans
@@ -164,7 +175,8 @@ class ArbScanner:
         
         logger.info(
             "ArbScanner initialized - Looking for sum(prices) < 0.98 opportunities\\n"
-            f"  Order book cache TTL: {self._cache_ttl_seconds}s (rate limit protection)"
+            f"  Order book cache TTL: {self._cache_ttl_seconds}s (rate limit protection)\\n"
+            f"  WebSocket Mode: {'ENABLED' if market_data_manager else 'DISABLED (REST fallback)'}"
         )
 
     async def scan_markets(
@@ -280,33 +292,51 @@ class ArbScanner:
 
     async def _get_cached_order_book(self, token_id: str):
         """
-        FLAW 3 FIX: Get order book with caching to prevent rate limits
+        2026 UPGRADE: Get order book from WebSocket cache or REST fallback
         
-        Instead of polling Polymarket API for every token in every market scan,
-        we cache order books for 2 seconds. This reduces 200+ API calls per scan
-        to just the unique tokens, preventing 429 rate limit errors.
+        Priority:
+        1. Read from MarketStateCache (sub-50ms latency)
+        2. If stale or missing, fallback to REST API
+        3. Cache REST response locally (2s TTL)
         
         Args:
             token_id: Token to fetch order book for
             
         Returns:
-            Order book data (fresh or cached)
+            Order book data (fresh from cache or REST)
         """
-        current_time = time.time()
+        # PRIORITY 1: Try WebSocket cache first (if available)
+        if self.market_data_manager:
+            cached_book = self.market_data_manager.get_order_book(token_id)
+            
+            if cached_book and not self.market_data_manager.is_market_stale(token_id):
+                # Cache hit with fresh data - return immediately
+                logger.debug(f"[CACHE HIT] {token_id[:8]}... from WebSocket cache")
+                return cached_book
+            
+            # Stale cache - force REST refresh
+            if cached_book:
+                logger.debug(f"[STALE CACHE] {token_id[:8]}... refreshing from REST")
+                success = await self.market_data_manager.force_refresh_from_rest(token_id)
+                if success:
+                    return self.market_data_manager.get_order_book(token_id)
         
-        # Check if we have a valid cached entry
+        # PRIORITY 2: Local cache (for systems without MarketDataManager)
+        current_time = time.time()
         if token_id in self._orderbook_cache:
             cached_book, cache_time = self._orderbook_cache[token_id]
             
             if (current_time - cache_time) < self._cache_ttl_seconds:
-                # Cache hit - return cached data
+                # Local cache hit
+                logger.debug(f"[LOCAL CACHE] {token_id[:8]}... from local cache")
                 return cached_book
         
-        # Cache miss or expired - fetch fresh data
+        # PRIORITY 3: Fetch from REST API
         try:
+            logger.debug(f"[REST FETCH] {token_id[:8]}... fetching from API")
             order_book = await self.client.get_order_book(token_id)
             
-            # Store in cache
+            # Store in local cache
             self._orderbook_cache[token_id] = (order_book, current_time)
             
             return order_book
@@ -315,7 +345,7 @@ class ArbScanner:
             # If fetch fails and we have stale cache, return stale data
             if token_id in self._orderbook_cache:
                 logger.warning(
-                    f"Order book fetch failed for {token_id[:8]}, using stale cache"
+                    f"Order book fetch failed for {token_id[:8]}, using stale local cache"
                 )
                 cached_book, _ = self._orderbook_cache[token_id]
                 return cached_book

@@ -795,8 +795,37 @@ class MarketMakingStrategy(BaseStrategy):
                     logger.debug(f"Error syncing fill for order {order_id[:8]}...: {e}")
     
     async def _update_quotes(self) -> None:
-        """Update quotes for all active positions (parallel execution)"""
+        """
+        Update quotes for all active positions (parallel execution)
+        
+        INSTITUTIONAL SAFETY: LAG CIRCUIT BREAKER
+        - Checks for stale data (>2s old) before updating quotes
+        - Cancels all quotes if any active market has stale data
+        - Prevents trading on outdated prices during WebSocket outages
+        """
         current_time = time.time()
+        
+        # SAFETY: LAG CIRCUIT BREAKER - Check for stale data
+        if self._market_data_manager:
+            # Get all token IDs from active positions
+            active_token_ids = []
+            for position in self._positions.values():
+                active_token_ids.extend(position.token_ids)
+            
+            # Check if any market is stale
+            if self._market_data_manager.check_market_staleness(active_token_ids):
+                stale_markets = self._market_data_manager.get_stale_markets()
+                logger.error(
+                    f"🚨 LAG CIRCUIT BREAKER TRIGGERED: {len(stale_markets)} markets have stale data (>2s)\\n"
+                    f"   Stale assets: {list(stale_markets)[:5]}\\n"
+                    f"   ACTION: Cancelling ALL quotes to prevent trading on outdated prices"
+                )
+                
+                # Cancel all quotes immediately
+                await self._cancel_all_quotes()
+                
+                # Skip quote updates this cycle - wait for fresh data
+                return
         
         # Collect markets that need updates
         markets_to_update = []
@@ -813,6 +842,38 @@ class MarketMakingStrategy(BaseStrategy):
             )
             for m_id in markets_to_update:
                 self._last_quote_update[m_id] = current_time
+    
+    async def _cancel_all_quotes(self) -> None:
+        """
+        Emergency function to cancel all active quotes
+        
+        Used by LAG CIRCUIT BREAKER when stale data detected.
+        """
+        logger.warning("[EMERGENCY] Cancelling all active quotes...")
+        
+        cancel_count = 0
+        for position in self._positions.values():
+            # Cancel all bids
+            for order_id in list(position.active_bids.values()):
+                try:
+                    await self.client.cancel_order(order_id)
+                    cancel_count += 1
+                except Exception as e:
+                    logger.debug(f"Failed to cancel bid {order_id[:8]}...: {e}")
+            
+            # Cancel all asks
+            for order_id in list(position.active_asks.values()):
+                try:
+                    await self.client.cancel_order(order_id)
+                    cancel_count += 1
+                except Exception as e:
+                    logger.debug(f"Failed to cancel ask {order_id[:8]}...: {e}")
+            
+            # Clear tracking
+            position.active_bids.clear()
+            position.active_asks.clear()
+        
+        logger.info(f"✅ Cancelled {cancel_count} orders via LAG CIRCUIT BREAKER")
     
     async def _reconcile_order(self, token_id: str, side: str, target_price: float, 
                               target_size: float, current_order_id: Optional[str], 

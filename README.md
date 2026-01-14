@@ -1,15 +1,25 @@
 # Polymarket Arbitrage Bot
 
-**Production-grade bot for exploiting Polymarket inefficiencies** using mirror trading and arbitrage strategies. Built for 24/7 AWS EC2 operation with enterprise-class reliability, monitoring, and safety controls.
+**Production-grade bot for exploiting Polymarket inefficiencies** using arbitrage and market making strategies. Built for 24/7 AWS EC2 operation with enterprise-class reliability, monitoring, and safety controls.
 
 ## 🎯 Features
 
 ### Core Trading
-- **Mirror Trading Strategy**: Automatically replicate trades from whale wallets
-- **Multiple Strategies**: Extensible architecture supports mirror, arbitrage, and custom strategies
+- **Arbitrage Strategy**: Multi-outcome arbitrage detection (sum of prices < 0.98)
+- **Market Making Strategy**: Liquidity provision with inventory management
+- **WebSocket Architecture**: Real-time market data with <50ms latency
 - **L2 Authentication**: High-rate-limit endpoints (3500 req/10s vs 500 req/10s)
-- **FOK Orders**: Fill-Or-Kill execution with smart retry logic
-- **Balance-Based Trading**: Continuously trade based on available USDC
+- **Atomic Execution**: All-or-nothing order execution with depth validation
+- **Event-Driven**: Sub-50ms cache reads vs 1000ms REST polling
+
+### WebSocket Features (2026 Upgrade)
+- **MarketStateCache**: Thread-safe shared memory cache for both strategies
+- **Single WebSocket Connection**: Serves arbitrage + market making simultaneously
+- **Timestamp Integrity**: Rejects out-of-order WebSocket messages
+- **Lag Circuit Breaker**: Cancels all quotes if data >2s stale
+- **Exponential Backoff**: Reconnection with 2^n delay (up to 60s)
+- **State Rehydration**: REST sync after every reconnect
+- **Dynamic Subscriptions**: Auto-subscribe to active markets
 
 ### Production Reliability
 - **24/7 Operation**: Systemd service with auto-restart and graceful shutdown
@@ -24,8 +34,8 @@
 - **Slippage Protection**: Validate execution prices
 - **Position Limits**: Configurable maximum position sizes
 - **Daily Volume Limits**: Prevent runaway trading
-- **Entry Time Filtering**: Only mirror recent whale positions
-- **Dust Thresholds**: Ignore insignificant positions
+- **Stale Data Protection**: 2-second staleness threshold
+- **Post-Only Orders**: Maker rebate optimization
 
 ### Enterprise Architecture
 - **Centralized Configuration**: All constants in one place with clear documentation
@@ -89,42 +99,49 @@ sudo systemctl status polymarket-bot
 
 ```
 polymarket-arb-bot/
-├── src/                           # Main application code
-│   ├── main.py                    # Bot entry point with lifecycle management
+├── src/                                # Main application code
+│   ├── main.py                         # Bot entry point with lifecycle management
 │   ├── config/
-│   │   ├── constants.py           # ALL configuration in one place ⭐
-│   │   └── aws_config.py          # AWS Secrets Manager integration
+│   │   ├── constants.py                # ALL configuration in one place ⭐
+│   │   └── aws_config.py               # AWS Secrets Manager integration
 │   ├── core/
-│   │   ├── polymarket_client.py   # Polymarket API client
-│   │   ├── order_manager.py       # Order execution & risk management
-│   │   └── whale_ws_listener.py   # WebSocket listener for whale tracking
+│   │   ├── polymarket_client.py        # Polymarket API client
+│   │   ├── order_manager.py            # Order execution & risk management
+│   │   ├── market_data_manager.py      # WebSocket real-time data (2026) ⭐
+│   │   ├── atomic_depth_aware_executor.py  # Atomic execution engine
+│   │   └── maker_executor.py           # Post-only order executor
 │   ├── strategies/
-│   │   ├── base_strategy.py       # Abstract strategy interface
-│   │   └── mirror_strategy.py     # Mirror trading implementation
+│   │   ├── base_strategy.py            # Abstract strategy interface
+│   │   ├── arb_scanner.py              # Arbitrage opportunity detection
+│   │   ├── arbitrage_strategy.py       # Arbitrage execution strategy
+│   │   └── market_making_strategy.py   # Market making with inventory mgmt
 │   └── utils/
-│       ├── logger.py              # Production logging with rotation ⭐
-│       ├── exceptions.py          # Custom exception hierarchy ⭐
-│       └── helpers.py             # Security validators & utilities ⭐
-├── tests/                         # Comprehensive test suite
-│   ├── conftest.py               # Pytest fixtures
+│       ├── logger.py                   # Production logging with rotation ⭐
+│       ├── exceptions.py               # Custom exception hierarchy ⭐
+│       └── helpers.py                  # Security validators & utilities ⭐
+├── tests/                              # Comprehensive test suite
+│   ├── conftest.py                     # Pytest fixtures
 │   ├── test_config.py
-│   ├── test_mirror_strategy.py
+│   ├── test_arb_scanner.py
 │   └── test_polymarket_client.py
 ├── scripts/
-│   ├── deploy_ec2.sh            # AWS deployment automation
-│   ├── health_check.sh          # Health monitoring
-│   └── polymarket-bot.service   # Systemd service file
-├── requirements.txt             # Python dependencies
-├── setup.py                     # Package configuration
-├── PRODUCTION_DEPLOYMENT.md     # AWS deployment guide ⭐
-└── README.md                    # This file
+│   ├── deploy_ec2.sh                   # AWS deployment automation
+│   ├── health_check.sh                 # Health monitoring
+│   └── polymarket-bot.service          # Systemd service file
+├── requirements.txt                    # Python dependencies
+├── setup.py                            # Package configuration
+├── WEBSOCKET_ARCHITECTURE.md           # WebSocket migration guide ⭐
+├── PRODUCTION_DEPLOYMENT.md            # AWS deployment guide ⭐
+└── README.md                           # This file
 ```
 
 **Key Production-Grade Files (⭐):**
-- `config/constants.py` - Centralized configuration with 1000+ lines of documentation
+- `config/constants.py` - Centralized configuration with comprehensive documentation
+- `core/market_data_manager.py` - WebSocket architecture with <50ms latency
 - `utils/logger.py` - Production logging with rotating files and JSON formatting
 - `utils/exceptions.py` - Custom exception hierarchy for precise error handling
 - `utils/helpers.py` - Security validators (address, price, order, slippage checks)
+- `WEBSOCKET_ARCHITECTURE.md` - Complete WebSocket migration documentation
 - `PRODUCTION_DEPLOYMENT.md` - Complete AWS EC2 deployment and operations guide
 
 ## ⚙️ Configuration
@@ -134,22 +151,24 @@ All configuration is centralized in [src/config/constants.py](src/config/constan
 ### Key Parameters
 
 ```python
-# Trading
-MIRROR_TARGET = "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"  # Whale to mirror
-PROXY_WALLET_ADDRESS = "0x5967c88F93f202D595B9A47496b53E28cD61F4C3"  # Your trading address
-MAX_ORDER_USD = 1.0  # Max order size
-ENTRY_PRICE_GUARD = 0.0005  # Don't buy >0.05% worse than whale
+# Trading Strategies
+ARBITRAGE_ENABLED = True  # Multi-outcome arbitrage detection
+MARKET_MAKING_ENABLED = True  # Liquidity provision
+MARKET_MAKING_STRATEGY_CAPITAL = 100.0  # MM capital allocation
+
+# WebSocket Architecture (2026)
+WEBSOCKET_ENABLED = True  # Real-time data via WebSocket
+WEBSOCKET_STALE_THRESHOLD = 2.0  # Lag circuit breaker (seconds)
 
 # Safety
 ENABLE_CIRCUIT_BREAKER = True  # Stop on large losses
 CIRCUIT_BREAKER_LOSS_THRESHOLD_USD = 25.0  # Loss limit (USD)
+DRAWDOWN_LIMIT_USD = 10.0  # Max drawdown before kill switch
 MAX_POSITION_SIZE_USD = 50.0  # Max per market
-MAX_DAILY_VOLUME_USD = 10000.0  # Daily limit
 
 # Operational
-LOOP_INTERVAL_SEC = 2  # How often to check for opportunities
-USE_WEBSOCKET_DETECTION = False  # WebSocket vs polling
-ENABLE_TIME_BASED_FILTERING = True  # Only recent whale positions
+LOOP_INTERVAL_SEC = 1  # Arbitrage scan interval (reduced from 3s)
+HEARTBEAT_INTERVAL_SEC = 300  # Balance check interval
 
 # AWS
 AWS_REGION = "eu-west-1"  # Ireland (per Polymarket support)
