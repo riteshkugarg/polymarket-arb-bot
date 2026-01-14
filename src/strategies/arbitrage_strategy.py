@@ -115,8 +115,8 @@ class ArbitrageStrategy(BaseStrategy):
         self.atomic_executor = atomic_executor or AtomicDepthAwareExecutor(client, order_manager)
         self.use_depth_aware_executor = atomic_executor is not None
         
-        # Strategy state
-        self._is_running = False
+        # Strategy state (use is_running from BaseStrategy)
+        # self.is_running is already set by BaseStrategy.__init__()
         self._consecutive_failures = 0
         self._circuit_breaker_active = False
         self._last_execution_time = 0
@@ -278,11 +278,11 @@ class ArbitrageStrategy(BaseStrategy):
         3. Trigger arb scan ONLY when prices change in arb-eligible markets
         4. Execute opportunities with cross-strategy coordination
         """
-        if self._is_running:
+        if self.is_running:
             logger.warning("ArbitrageStrategy already running")
             return
         
-        self._is_running = True
+        self.is_running = True
         logger.info("🚀 ArbitrageStrategy started (EVENT-DRIVEN MODE)")
         
         try:
@@ -303,7 +303,7 @@ class ArbitrageStrategy(BaseStrategy):
             else:
                 # Fallback to polling if no WebSocket manager
                 logger.warning("No MarketDataManager - falling back to polling mode")
-                while self._is_running:
+                while self.is_running:
                     try:
                         await self._arb_scan_loop()
                         await asyncio.sleep(ARB_SCAN_INTERVAL_SEC)
@@ -315,7 +315,7 @@ class ArbitrageStrategy(BaseStrategy):
                 return
             
             # Keep strategy alive (event handlers run in background)
-            while self._is_running:
+            while self.is_running:
                 await asyncio.sleep(1)
                 
                 # Periodic health check
@@ -329,12 +329,12 @@ class ArbitrageStrategy(BaseStrategy):
             # Cleanup
             if self._market_data_manager:
                 self._market_data_manager.cache.unregister_market_update_handler('arbitrage_scanner')
-            self._is_running = False
+            self.is_running = False
             logger.info("🛑 ArbitrageStrategy stopped")
 
     async def stop(self) -> None:
         """Stop the strategy loop"""
-        self._is_running = False
+        self.is_running = False
         logger.info("Stopping ArbitrageStrategy")
     
     def set_market_making_strategy(self, mm_strategy: Any) -> None:
@@ -351,10 +351,23 @@ class ArbitrageStrategy(BaseStrategy):
             response = await self.client.get_markets()
             markets = response.get('data', [])
             
+            logger.debug(f"Fetched {len(markets)} total markets from API")
+            
+            # Sample first market to understand structure
+            if markets and len(markets) > 0:
+                sample = markets[0]
+                logger.debug(
+                    f"Sample market structure - tokens: {len(sample.get('tokens', []))}, "
+                    f"clobTokenIds: {len(sample.get('clobTokenIds', []))}, "
+                    f"keys: {list(sample.keys())[:10]}"
+                )
+            
             # Filter for multi-outcome markets (3+ outcomes)
+            multi_outcome_count = 0
             for market in markets:
                 tokens = market.get('tokens', [])
                 if len(tokens) >= 3:
+                    multi_outcome_count += 1
                     # Add all token IDs to subscription list
                     token_ids = market.get('clobTokenIds', [])
                     for token_id in token_ids:
@@ -362,11 +375,11 @@ class ArbitrageStrategy(BaseStrategy):
             
             logger.info(
                 f"Discovered {len(self._arb_eligible_markets)} arb-eligible assets "
-                f"across multi-outcome markets"
+                f"across {multi_outcome_count} multi-outcome markets (out of {len(markets)} total)"
             )
             
         except Exception as e:
-            logger.error(f"Failed to discover arb-eligible markets: {e}")
+            logger.error(f"Failed to discover arb-eligible markets: {e}", exc_info=True)
     
     async def _on_market_update(self, asset_id: str, snapshot: Any) -> None:
         """Handle price update event (EVENT-DRIVEN callback)
@@ -878,7 +891,7 @@ class ArbitrageStrategy(BaseStrategy):
         budget_status = self.executor.get_budget_status()
         
         return {
-            'is_running': self._is_running,
+            'is_running': self.is_running,
             'circuit_breaker_active': self._circuit_breaker_active,
             'consecutive_failures': self._consecutive_failures,
             'total_executions': self._total_arb_executions,
