@@ -75,6 +75,23 @@ MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.97
 
 
 # ============================================================================
+# 2B. ARBITRAGE FEE CONFIGURATION
+# ============================================================================
+# Taker fee parameters for arbitrage execution
+# CRITICAL: If Polymarket moves to dynamic fees, update these constants
+# Current fee tier: 1.2% (competitive with 1% tier traders)
+
+# Taker fee percentage per trade (basis for opportunity detection)
+# Current Polymarket fee: 1.0% (for tier 1) to 1.5% (for tier 0)
+# We use 1.2% as competitive buffer (beats tier 0, loses to tier 1)
+ARBITRAGE_TAKER_FEE_PERCENT: Final[float] = 0.012  # 1.2%
+
+# Arbitrage opportunity threshold
+# Only execute if sum(prices) < this threshold (accounts for fees)
+ARBITRAGE_OPPORTUNITY_THRESHOLD: Final[float] = 0.98  # sum < 98 cents
+
+
+# ============================================================================
 # 3. TRADING PARAMETERS
 # ============================================================================
 

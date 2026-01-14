@@ -914,7 +914,7 @@ class PolymarketClient:
                     }
                     positions.append(position_data)
                 
-                logger.info(
+                logger.debug(
                     f"Retrieved {len(positions)} positions from Data API - "
                     f"address: {address[:10]}..., count: {len(positions)}"
                 )

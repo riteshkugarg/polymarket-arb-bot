@@ -58,7 +58,7 @@ from enum import Enum
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
 from core.market_data_manager import MarketDataManager, MarketSnapshot
-from config.constants import ARBITRAGE_STRATEGY_CAPITAL  # Import budget from constants
+from config.constants import ARBITRAGE_STRATEGY_CAPITAL, ARBITRAGE_TAKER_FEE_PERCENT
 from utils.logger import get_logger
 from utils.exceptions import (
     OrderRejectionError,
@@ -74,7 +74,7 @@ logger = get_logger(__name__)
 # Constants for arbitrage logic
 # COMPETITIVE BUFFER: 1.2% (allows competing with 1% fee tier traders)
 # Previous: 1.5% (too conservative - missed opportunities to competitors)
-TAKER_FEE_PERCENT = 0.012  # 1.2% per trade (institution-grade competitive)
+TAKER_FEE_PERCENT = ARBITRAGE_TAKER_FEE_PERCENT  # Import from constants for flexibility
 ARBITRAGE_OPPORTUNITY_THRESHOLD = 0.98  # sum(prices) < 0.98
 TAKER_FEE_BUFFER = TAKER_FEE_PERCENT  # Account for fee in opportunity detection
 FINAL_THRESHOLD = ARBITRAGE_OPPORTUNITY_THRESHOLD  # sum < 0.98 after fee buffer

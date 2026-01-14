@@ -67,13 +67,14 @@ class MarketSnapshot:
     bids: List[Dict[str, Any]] = field(default_factory=list)
     asks: List[Dict[str, Any]] = field(default_factory=list)
     
-    def is_stale(self, threshold_seconds: float = 0.5) -> bool:
+    def is_stale(self, threshold_seconds: float = 7.0) -> bool:
         """Check if data hasn't been updated in threshold seconds
         
-        INSTITUTIONAL GRADE: 500ms threshold (was 2s)
-        - Most HFT systems use 100-250ms
-        - 500ms balances safety vs false positives
-        - Prevents quoting on stale data during connection hiccups
+        PRODUCTION-GRADE: 7s threshold (5s heartbeat + 2s jitter buffer)
+        - Prevents false positives from network latency
+        - Aligns with 5s WebSocket heartbeat interval
+        - Previous 0.5s was too aggressive (caused spurious "stale data" warnings)
+        - Institution balance: Fast enough to detect real disconnects, slow enough to avoid false alarms
         """
         return (time.time() - self.last_update) > threshold_seconds
     
@@ -130,12 +131,14 @@ class MarketStateCache:
     - Thread Safety: All operations protected by RLock
     """
     
-    def __init__(self, stale_threshold_seconds: float = 0.5):
+    def __init__(self, stale_threshold_seconds: float = 7.0):
         """Initialize market state cache
         
-        HFT-GRADE STALENESS: 500ms default (was 2.0s)
-        Per institution-grade review: 2s data is toxic in fast markets
-        (political debates, sports events require sub-second freshness)
+        PRODUCTION-GRADE STALENESS: 7s default (5s heartbeat + 2s jitter)
+        - Per production review: Must accommodate 5s WebSocket heartbeat
+        - Prevents spurious "stale data" warnings from network jitter
+        - Previous 0.5s caused false positives (heartbeat delay triggers circuit breaker)
+        - Balance: Fast enough to detect real disconnects, tolerant of normal latency
         """
         self._cache: Dict[str, MarketSnapshot] = {}
         self._lock = Lock()
@@ -252,7 +255,7 @@ class MarketStateCache:
             self._market_info[market_id] = info
     
     def get_market_info(self, market_id: str) -> Optional[Dict[str, Any]]:
-        """Get cached market metadata"""
+        """Get cached market metadata (thread-safe)"""
         with self._lock:
             return self._market_info.get(market_id)
     
@@ -268,7 +271,7 @@ class MarketStateCache:
                 self._user_fills[fill.asset_id] = self._user_fills[fill.asset_id][-100:]
     
     def get_recent_fills(self, asset_id: str, max_age_seconds: float = 60.0) -> List[FillEvent]:
-        """Get recent fills for an asset (within max_age_seconds)"""
+        """Get recent fills for an asset (within max_age_seconds) - thread-safe"""
         with self._lock:
             if asset_id not in self._user_fills:
                 return []
@@ -845,7 +848,7 @@ class MarketDataManager:
     def __init__(
         self,
         client: Any,
-        stale_threshold: float = 0.5,  # HFT-GRADE: 500ms default (was 2.0s)
+        stale_threshold: float = 7.0,  # PRODUCTION: 7s (5s heartbeat + 2s jitter)
         ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     ):
         self.client = client
