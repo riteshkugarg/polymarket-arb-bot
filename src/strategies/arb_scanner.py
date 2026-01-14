@@ -85,7 +85,10 @@ SLIPPAGE_LOOSE = 0.010  # $0.010 for deep books
 DEPTH_THRESHOLD_THIN = 20  # shares
 DEPTH_THRESHOLD_MEDIUM = 100  # shares
 
-MIN_ORDER_BOOK_DEPTH = 10  # Require depth for at least 10 shares
+# Depth validation
+# Per Polymarket Support (Jan 2026): Lower to 5 shares for small capital markets
+# Previous: 10 shares (too strict)
+MIN_ORDER_BOOK_DEPTH = 5  # Require depth for at least 5 shares
 MAX_ARBITRAGE_BUDGET_PER_BASKET = 10.0  # Max $10 per arbitrage basket
 MIN_ARBITRAGE_BUDGET_PER_BASKET = 5.0  # Min $5 per arbitrage basket
 TOTAL_ARBITRAGE_BUDGET = 100.0  # Total budget cap

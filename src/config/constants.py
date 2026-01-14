@@ -515,9 +515,19 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 # Market Selection
 # -----------------
 # Minimum 24h volume to consider for market making (USD)
-# Per Polymarket Support (Jan 2026): Lowered from $500 to $100
-# Rationale: More markets available, bot can be selective with spread/liquidity checks
-MM_MIN_MARKET_VOLUME_24H: Final[float] = 100.0
+# Per Polymarket Support (Jan 2026): $50/day for small capital ($50 allocation)
+# Rationale: "With $50 capital, focus on markets with sufficient liquidity rather than just volume"
+MM_MIN_MARKET_VOLUME_24H: Final[float] = 50.0
+
+# Minimum liquidity (orderbook depth) - MORE CRITICAL THAN VOLUME
+# Per Polymarket Support: "Liquidity is more critical for market makers"
+# Recommended: liquidity_num_min=20 for small capital
+MM_MIN_LIQUIDITY: Final[float] = 20.0
+
+# Minimum depth (shares) on best bid/ask
+# Per Polymarket Support: "Lower to 5 shares (or even lower) with $50 capital"
+# Previous: 10 shares (too strict for small markets)
+MM_MIN_DEPTH_SHARES: Final[float] = 5.0
 
 # Maximum spread to consider market liquid enough
 MM_MAX_SPREAD_PERCENT: Final[float] = 0.10  # 10% max spread

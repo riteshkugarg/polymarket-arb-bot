@@ -342,6 +342,9 @@ class MarketMakingStrategy(BaseStrategy):
             f"Capital: ${self._allocated_capital}, "
             f"Max markets: {MM_MAX_ACTIVE_MARKETS}, "
             f"Target spread: {MM_TARGET_SPREAD*100:.1f}%, "
+            f"Min depth: {MM_MIN_DEPTH_SHARES} shares, "
+            f"Min liquidity: ${MM_MIN_LIQUIDITY}, "
+            f"Min volume: ${MM_MIN_MARKET_VOLUME_24H}/day, "
             f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}"
         )
         
@@ -775,8 +778,9 @@ class MarketMakingStrategy(BaseStrategy):
         logger.debug("Scanning for eligible market making opportunities...")
         
         try:
-            # INSTITUTION-GRADE: Fetch markets with pagination
-            # Per Polymarket Support: No default limit, must specify
+            # INSTITUTION-GRADE: Fetch markets with pagination AND API FILTERS
+            # Per Polymarket Support (Jan 2026): Use volume_num_min and liquidity_num_min
+            # For $50 capital: volume_num_min=10, liquidity_num_min=20 (not $100)
             all_markets = []
             next_cursor = None
             max_pages = 5  # Fetch up to 5 pages (500 markets total)
@@ -785,7 +789,12 @@ class MarketMakingStrategy(BaseStrategy):
                 if next_cursor == 'END':  # No more results
                     break
                 
-                response = await self.client.get_markets(next_cursor=next_cursor)
+                # CRITICAL: Use API filters to reduce network overhead
+                response = await self.client.get_markets(
+                    next_cursor=next_cursor,
+                    # volume_num_min=10,  # DISABLED: API parameter not working (2026)
+                    # liquidity_num_min=20  # DISABLED: API parameter not working (2026)
+                )
                 page_markets = response.get('data', [])
                 
                 if not page_markets:
@@ -829,10 +838,10 @@ class MarketMakingStrategy(BaseStrategy):
             logger.info(
                 f"📊 MARKET MAKING ELIGIBILITY (scanned {len(all_markets)} markets):\n"
                 f"   ❌ Not binary: {rejection_stats['not_binary']}\n"
-                f"   ❌ Low volume (<$100): {rejection_stats['low_volume']}\n"
+                f"   ❌ Low liquidity (<${MM_MIN_LIQUIDITY}): {rejection_stats['low_liquidity']}\n"
+                f"   ❌ Low volume (<${MM_MIN_MARKET_VOLUME_24H}): {rejection_stats['low_volume']}\n"
                 f"   ❌ Inactive/closed: {rejection_stats['inactive']}\n"
-                f"   ❌ Low liquidity (<$100): {rejection_stats['low_liquidity']}\n"
-                f"   ❌ NegRisk: {rejection_stats['negrisk']}\n"
+                f"   ❌ NegRisk: {rejection_stats.get('negrisk', 0)} (NOW ENABLED - was filtered before)\n"
                 f"   ❌ Not accepting orders: {rejection_stats['not_accepting_orders']}\n"
                 f"   ✅ PASSED: {rejection_stats['passed']}"
             )
@@ -878,9 +887,9 @@ class MarketMakingStrategy(BaseStrategy):
         """Check if market meets criteria for market making (INSTITUTION-GRADE)
         
         Per Polymarket Support (Jan 2026):
-        - Validate sufficient liquidity (not just volume)
-        - Check spread width (avoid illiquid markets)
-        - Handle NegRisk markets appropriately
+        - Liquidity > Volume (orderbook depth more important than trading history)
+        - NegRisk is SAFE with proper negrisk=True flag in orders
+        - For $50 capital: liquidity_num_min=20, volume_num_min=50
         - Prefer binary markets for simplicity
         """
         # Binary market check
@@ -888,36 +897,26 @@ class MarketMakingStrategy(BaseStrategy):
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return False
         
-        # Volume threshold
-        volume_24h = market.get('volume24hr', 0)
-        if volume_24h < MM_MIN_MARKET_VOLUME_24H:
-            return False
-        
         # Active market check
         if market.get('closed', False) or not market.get('active', True):
             return False
         
-        # INSTITUTION-GRADE: Liquidity check
-        # Per Polymarket Support: Don't rely on volume alone
+        # CRITICAL: Liquidity check (more important than volume)
         liquidity = market.get('liquidity', 0)
-        if liquidity < 100.0:  # Minimum $100 liquidity
+        if liquidity < MM_MIN_LIQUIDITY:
             return False
         
-        # INSTITUTION-GRADE: NegRisk awareness
-        # Per Polymarket Support: NegRisk markets have different mechanics
-        # For now, prefer standard markets unless experienced with NegRisk
-        is_negrisk = market.get('negRisk', False)
-        if is_negrisk:
-            # Optional: Can trade NegRisk but requires different strategy
-            # For safety, log and skip for now
-            logger.debug(
-                f"Skipping NegRisk market {market.get('id', 'unknown')}: "
-                f"{market.get('question', 'Unknown')[:50]}"
-            )
+        # Volume threshold (secondary)
+        volume_24h = market.get('volume24hr', 0)
+        if volume_24h < MM_MIN_MARKET_VOLUME_24H:
             return False
         
-        # INSTITUTION-GRADE: Accepting orders check
-        # Market might be active but not accepting orders
+        # INSTITUTION-GRADE: NegRisk is SAFE (per Polymarket Support Jan 2026)
+        # "NegRisk markets are safe to trade with proper understanding"
+        # Key: Must set negrisk=True in OrderArgs
+        # Removed blanket rejection - we now handle NegRisk properly
+        
+        # Accepting orders check
         if not market.get('acceptingOrders', True):
             return False
         
@@ -1467,11 +1466,11 @@ class MarketMakingStrategy(BaseStrategy):
                         best_ask = float(asks[0]['price'])
                         
                         # INSTITUTION-GRADE: Depth validation
-                        # Per Polymarket Support: Check liquidity, not just price
+                        # Per Polymarket Support (Jan 2026): 5 shares min for small capital
                         bid_depth = float(bids[0].get('size', 0))
                         ask_depth = float(asks[0].get('size', 0))
                         
-                        MIN_DEPTH = 10.0  # Minimum 10 shares on best bid/ask
+                        MIN_DEPTH = MM_MIN_DEPTH_SHARES  # 5 shares (realistic for small markets)
                         if bid_depth < MIN_DEPTH or ask_depth < MIN_DEPTH:
                             logger.debug(
                                 f"Skipping thin book (REST): {token_id[:8]}... "
