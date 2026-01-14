@@ -2430,11 +2430,18 @@ class PolymarketClient:
         self._ensure_initialized()
         
         try:
+            # ClobClient.get_orders() doesn't accept asset_id parameter in current version
+            # Call without parameters to get all orders, then filter
             orders = await asyncio.to_thread(
-                self._client.get_orders,
-                asset_id=token_id
+                self._client.get_orders
             )
-            return [o for o in orders if o.get('status') == 'LIVE']
+            
+            # Filter by status and optionally by token_id
+            result = [o for o in orders if o.get('status') == 'LIVE']
+            if token_id:
+                result = [o for o in result if o.get('asset_id') == token_id or o.get('token_id') == token_id]
+            
+            return result
             
         except Exception as e:
             logger.error(f"Failed to get open orders: {e}")

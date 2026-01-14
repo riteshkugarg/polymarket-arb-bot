@@ -8,6 +8,7 @@ import os
 import sys
 import signal
 import asyncio
+import aiohttp
 import time
 import json
 from typing import Optional, List, Dict, Any
@@ -2439,7 +2440,7 @@ class PolymarketBot:
             logger.error("[SCAN] No ArbScanner found - cannot start scanning")
             return
         
-        while self.running:
+        while self.is_running:
             try:
                 # Scan for arbitrage opportunities
                 opportunities = await arb_scanner.scan_markets()
@@ -3208,8 +3209,11 @@ class PolymarketBot:
             logger.info(f"Daily Volume: {daily_volume} USDC")
         
         for strategy in self.strategies:
-            status = strategy.get_status()
-            logger.info(f"Strategy {status['name']}: Running={status['is_running']}")
+            if hasattr(strategy, 'get_status'):
+                status = strategy.get_status()
+                logger.info(f"Strategy {status['name']}: Running={status['is_running']}")
+            else:
+                logger.info(f"Strategy {strategy.__class__.__name__}: No status available")
         
         logger.info("=" * 80)
 
