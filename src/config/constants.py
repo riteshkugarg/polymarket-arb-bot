@@ -42,7 +42,40 @@ PROXY_WALLET_ADDRESS: Final[str] = os.getenv(
 
 
 # ============================================================================
-# 2. TRADING PARAMETERS
+# 2. MULTI-STRATEGY BUDGET ALLOCATION
+# ============================================================================
+# The bot runs multiple strategies in parallel, each with dedicated capital.
+# This prevents strategies from competing for the same funds and provides
+# clear risk isolation.
+#
+# Capital Allocation Philosophy:
+# - Arbitrage: Reserved capital for rare, high-confidence opportunities
+# - Market Making: Active capital for steady income generation
+# - Reserve: Safety buffer for unexpected scenarios
+#
+# Total available: $72.92 USDC (as of 2026-01-14)
+# ============================================================================
+
+# Arbitrage strategy allocation
+# Conservative allocation since opportunities are rare
+# Enough for 1-2 simultaneous arbitrage baskets at $10 each
+ARBITRAGE_STRATEGY_CAPITAL: Final[float] = 20.0
+
+# Market making strategy allocation  
+# Majority of capital for active deployment
+# Supports 4-5 simultaneous market making positions at $10-12 each
+MARKET_MAKING_STRATEGY_CAPITAL: Final[float] = 50.0
+
+# Reserve buffer (emergency fund, gas, unexpected fees)
+STRATEGY_RESERVE_BUFFER: Final[float] = 2.92
+
+# Maximum capital utilization across all strategies (safety check)
+# Set to 97% to leave small buffer for fees/gas
+MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.97
+
+
+# ============================================================================
+# 3. TRADING PARAMETERS
 # ============================================================================
 
 # Only buy if price is within 0.05% of whale's price
@@ -474,3 +507,89 @@ ENABLE_REBATE_TRACKING: Final[bool] = True
 
 # Rebate log file location
 REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
+
+# ============================================================================
+# MARKET MAKING STRATEGY PARAMETERS
+# ============================================================================
+
+# Market Selection
+# -----------------
+# Minimum 24h volume to consider for market making (USD)
+MM_MIN_MARKET_VOLUME_24H: Final[float] = 500.0
+
+# Maximum spread to consider market liquid enough
+MM_MAX_SPREAD_PERCENT: Final[float] = 0.10  # 10% max spread
+
+# Prefer binary markets (2 outcomes) for simplicity
+MM_PREFER_BINARY_MARKETS: Final[bool] = True
+
+# Maximum number of markets to make simultaneously
+MM_MAX_ACTIVE_MARKETS: Final[int] = 3
+
+
+# Position Sizing
+# ----------------
+# Base position size per market (USD)
+MM_BASE_POSITION_SIZE: Final[float] = 10.0
+
+# Maximum position size per market (USD)
+MM_MAX_POSITION_SIZE: Final[float] = 15.0
+
+# Maximum inventory (shares) per outcome per market
+# Prevents accumulating too much directional risk
+MM_MAX_INVENTORY_PER_OUTCOME: Final[int] = 30
+
+
+# Spread Management
+# ------------------
+# Target spread (profit per round trip before fees)
+MM_TARGET_SPREAD: Final[float] = 0.03  # 3 cents = 3%
+
+# Minimum spread (don't go tighter than this)
+MM_MIN_SPREAD: Final[float] = 0.02  # 2 cents = 2%
+
+# Maximum spread (if wider, market too illiquid)
+MM_MAX_SPREAD: Final[float] = 0.08  # 8 cents = 8%
+
+# Spread adjustment based on inventory imbalance
+# If long 20 shares, widen ask by this factor to encourage selling
+MM_INVENTORY_SPREAD_MULTIPLIER: Final[float] = 1.5
+
+
+# Risk Management
+# ----------------
+# Maximum loss per position before force-exit (USD)
+MM_MAX_LOSS_PER_POSITION: Final[float] = 3.0
+
+# Maximum time to hold inventory before force-liquidation (seconds)
+MM_MAX_INVENTORY_HOLD_TIME: Final[int] = 3600  # 1 hour
+
+# Position check interval (seconds)
+MM_POSITION_CHECK_INTERVAL: Final[int] = 30
+
+# Price move threshold to trigger emergency exit (percentage)
+# If price moves > 15% against position, exit immediately
+MM_EMERGENCY_EXIT_THRESHOLD: Final[float] = 0.15
+
+
+# Order Management
+# -----------------
+# Quote update frequency (seconds)
+# How often to cancel/replace quotes with updated prices
+MM_QUOTE_UPDATE_INTERVAL: Final[int] = 20
+
+# Order time-to-live (seconds)
+# Cancel and replace orders after this duration even if not filled
+MM_ORDER_TTL: Final[int] = 120
+
+# Minimum time between order placements (prevent spam)
+MM_MIN_ORDER_SPACING: Final[float] = 2.0
+
+
+# Performance Tracking
+# ---------------------
+# Enable detailed market making performance logs
+MM_ENABLE_PERFORMANCE_LOG: Final[bool] = True
+
+# Performance log file
+MM_PERFORMANCE_LOG_FILE: Final[str] = "logs/market_making_performance.jsonl"
