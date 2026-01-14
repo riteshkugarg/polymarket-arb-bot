@@ -775,11 +775,33 @@ class MarketMakingStrategy(BaseStrategy):
         logger.debug("Scanning for eligible market making opportunities...")
         
         try:
-            response = await self.client.get_markets()
-            all_markets = response.get('data', [])
+            # INSTITUTION-GRADE: Fetch markets with pagination
+            # Per Polymarket Support: No default limit, must specify
+            all_markets = []
+            next_cursor = None
+            max_pages = 5  # Fetch up to 5 pages (500 markets total)
             
+            for page in range(max_pages):
+                if next_cursor == 'END':  # No more results
+                    break
+                
+                response = await self.client.get_markets(next_cursor=next_cursor)
+                page_markets = response.get('data', [])
+                
+                if not page_markets:
+                    break
+                
+                all_markets.extend(page_markets)
+                next_cursor = response.get('next_cursor', 'END')
+                
+                logger.debug(f"Fetched page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
+            
+            logger.debug(f"Total markets fetched: {len(all_markets)}")
+            
+            # Filter for eligible markets
             eligible = [m for m in all_markets if self._is_market_eligible(m)]
             
+            # Sort by volume and take top candidates (3x capacity for rotation)
             self._eligible_markets = sorted(
                 eligible,
                 key=lambda m: m.get('volume24hr', 0),
@@ -788,25 +810,59 @@ class MarketMakingStrategy(BaseStrategy):
             
             logger.info(
                 f"Found {len(self._eligible_markets)} eligible markets for market making "
-                f"(min volume: ${MM_MIN_MARKET_VOLUME_24H})"
+                f"(min volume: ${MM_MIN_MARKET_VOLUME_24H}, scanned: {len(all_markets)})"
             )
             
             self._last_market_scan = current_time
             
         except Exception as e:
-            logger.error(f"Error scanning markets: {e}")
+            logger.error(f"Error scanning markets: {e}", exc_info=True)
     
     def _is_market_eligible(self, market: Dict[str, Any]) -> bool:
-        """Check if market meets criteria for market making"""
+        """Check if market meets criteria for market making (INSTITUTION-GRADE)
+        
+        Per Polymarket Support (Jan 2026):
+        - Validate sufficient liquidity (not just volume)
+        - Check spread width (avoid illiquid markets)
+        - Handle NegRisk markets appropriately
+        - Prefer binary markets for simplicity
+        """
+        # Binary market check
         tokens = market.get('tokens', [])
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return False
         
+        # Volume threshold
         volume_24h = market.get('volume24hr', 0)
         if volume_24h < MM_MIN_MARKET_VOLUME_24H:
             return False
         
+        # Active market check
         if market.get('closed', False) or not market.get('active', True):
+            return False
+        
+        # INSTITUTION-GRADE: Liquidity check
+        # Per Polymarket Support: Don't rely on volume alone
+        liquidity = market.get('liquidity', 0)
+        if liquidity < 100.0:  # Minimum $100 liquidity
+            return False
+        
+        # INSTITUTION-GRADE: NegRisk awareness
+        # Per Polymarket Support: NegRisk markets have different mechanics
+        # For now, prefer standard markets unless experienced with NegRisk
+        is_negrisk = market.get('negRisk', False)
+        if is_negrisk:
+            # Optional: Can trade NegRisk but requires different strategy
+            # For safety, log and skip for now
+            logger.debug(
+                f"Skipping NegRisk market {market.get('id', 'unknown')}: "
+                f"{market.get('question', 'Unknown')[:50]}"
+            )
+            return False
+        
+        # INSTITUTION-GRADE: Accepting orders check
+        # Market might be active but not accepting orders
+        if not market.get('acceptingOrders', True):
             return False
         
         return True
@@ -1353,6 +1409,19 @@ class MarketMakingStrategy(BaseStrategy):
                     if bids and asks:
                         best_bid = float(bids[0]['price'])
                         best_ask = float(asks[0]['price'])
+                        
+                        # INSTITUTION-GRADE: Depth validation
+                        # Per Polymarket Support: Check liquidity, not just price
+                        bid_depth = float(bids[0].get('size', 0))
+                        ask_depth = float(asks[0].get('size', 0))
+                        
+                        MIN_DEPTH = 10.0  # Minimum 10 shares on best bid/ask
+                        if bid_depth < MIN_DEPTH or ask_depth < MIN_DEPTH:
+                            logger.debug(
+                                f"Skipping thin book (REST): {token_id[:8]}... "
+                                f"(bid depth: {bid_depth}, ask depth: {ask_depth})"
+                            )
+                            continue
                         
                         spread = best_ask - best_bid
                         if spread > MM_MAX_SPREAD:
