@@ -1274,13 +1274,41 @@ class PolymarketBot:
                             
                             # For binary markets: index_set is typically [1, 2]
                             # representing YES (outcome 1) and NO (outcome 2)
-                            index_set = list(range(1, len(market_info.get("outcomes", [])) + 1))
+                            outcomes_list = market_info.get("outcomes", [])
+                            index_set = list(range(1, len(outcomes_list) + 1))
+                            
+                            # [SAFETY] FIX 3: Merge-Ready Flag
+                            # Only mark as mergeable if we hold the EXACT partition
+                            # Binary: [1, 2] required
+                            # NegRisk: Full index set including "Other" required
+                            is_mergeable = False
+                            
+                            if len(outcomes_list) == 2:
+                                # Binary market: must have exactly [1, 2]
+                                is_mergeable = (set(index_set) == {1, 2})
+                            else:
+                                # Multi-outcome NegRisk: must have ALL indices
+                                expected_indices = set(range(1, len(outcomes_list) + 1))
+                                is_mergeable = (set(index_set) == expected_indices)
+                                
+                                # Additional check: verify "Other" outcome exists
+                                has_other = any(
+                                    outcome.lower() in ['other', 'others', 'none of the above']
+                                    for outcome in outcomes_list
+                                )
+                                if not has_other:
+                                    logger.warning(
+                                        f"[MERGE] Condition {condition_id[:8]} missing 'Other' - not mergeable"
+                                    )
+                                    is_mergeable = False
                             
                             full_sets.append({
                                 "condition_id": condition_id,
                                 "index_set": index_set,
                                 "amount": full_set_amount,
-                                "market_info": market_info
+                                "market_info": market_info,
+                                "is_mergeable": is_mergeable,  # FIX 3: Merge-ready flag
+                                "num_outcomes": len(outcomes_list)
                             })
                             
                             logger.debug(
@@ -1340,37 +1368,41 @@ class PolymarketBot:
             # Convert amount to wei (CTF uses 6 decimals like USDC)
             amount_wei = int(amount * 1e6)
             
-            # Encode mergePositions call
-            # function mergePositions(
-            #     address collateralToken,
-            #     bytes32 conditionId,
-            #     uint256[] calldata indexSet,
-            #     uint256 amount
-            # )
-            
-            # Convert condition_id from hex string to bytes32
-            if condition_id.startswith("0x"):
-                condition_id_bytes = bytes.fromhex(condition_id[2:])
-            else:
-                condition_id_bytes = bytes.fromhex(condition_id)
-            
-            # Encode the function call
-            function_selector = self._web3.keccak(text="mergePositions(address,bytes32,uint256[],uint256)")[:4]
-            
-            encoded_params = encode(
-                ['address', 'bytes32', 'uint256[]', 'uint256'],
-                [
-                    Web3.to_checksum_address(USDC_ADDRESS),
-                    condition_id_bytes,
-                    index_set,
-                    amount_wei
-                ]
-            )
-            
-            calldata = function_selector + encoded_params
-            
-            # Submit transaction via RelayClient
+            # [SAFETY] FIX 4: Try-Except Wrapper for Merge Operations
+            # Polymarket Python Merge Snippet Integration
+            # Uses RelayClient to execute mergePositions on CTF contract
+            # Target: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045 (CTF)
             try:
+                # Encode mergePositions call
+                # function mergePositions(
+                #     address collateralToken,
+                #     bytes32 conditionId,
+                #     uint256[] calldata indexSet,
+                #     uint256 amount
+                # )
+                
+                # Convert condition_id from hex string to bytes32
+                if condition_id.startswith("0x"):
+                    condition_id_bytes = bytes.fromhex(condition_id[2:])
+                else:
+                    condition_id_bytes = bytes.fromhex(condition_id)
+                
+                # Encode the function call
+                function_selector = self._web3.keccak(text="mergePositions(address,bytes32,uint256[],uint256)")[:4]
+                
+                encoded_params = encode(
+                    ['address', 'bytes32', 'uint256[]', 'uint256'],
+                    [
+                        Web3.to_checksum_address(USDC_ADDRESS),
+                        condition_id_bytes,
+                        index_set,
+                        amount_wei
+                    ]
+                )
+                
+                calldata = function_selector + encoded_params
+                
+                # Submit transaction via RelayClient
                 tx_result = await self._relay_client.submit_transaction(
                     to=CTF_CONTRACT_ADDRESS,
                     data=calldata.hex() if isinstance(calldata, bytes) else calldata
@@ -1388,16 +1420,39 @@ class PolymarketBot:
                 else:
                     logger.error(f"[MERGE] ❌ Merge failed - no transaction hash returned")
                     return False
-                
+                    
             except Exception as relay_err:
-                error_msg = str(relay_err)
-                logger.error(
-                    f"[MERGE] ❌ Relayer transaction failed: {error_msg}\\n"
-                    f"  Condition: {condition_id[:16]}\\n"
-                    f"  Amount: {amount:.4f} shares"
-                )
+                # [SAFETY] FIX 4: Comprehensive on-chain failure handling
+                error_str = str(relay_err).lower()
                 
-                # Pause merge operations for 60 seconds on failure
+                if 'revert' in error_str or 'execution reverted' in error_str:
+                    logger.error(
+                        f"[MERGE] ⚠️  On-chain revert detected!\\n"
+                        f"  Condition: {condition_id[:8]}...\\n"
+                        f"  Amount: {amount}\\n"
+                        f"  Error: {relay_err}\\n"
+                        f"  Likely cause: Incomplete partition or insufficient balance\\n"
+                        f"  Action: Pausing merge operations for {MERGE_FAILURE_PAUSE_SEC}s"
+                    )
+                elif 'insufficient' in error_str:
+                    logger.error(
+                        f"[MERGE] Insufficient balance for merge\\n"
+                        f"  Error: {relay_err}"
+                    )
+                elif 'nonce' in error_str:
+                    logger.error(
+                        f"[MERGE] Nonce error in merge transaction\\n"
+                        f"  Error: {relay_err}\\n"
+                        f"  Action: Will retry on next merge cycle"
+                    )
+                else:
+                    logger.error(
+                        f"[MERGE] Relayer transaction failed: {relay_err}\\n"
+                        f"  Condition: {condition_id[:16]}\\n"
+                        f"  Amount: {amount:.4f} shares"
+                    )
+                
+                # Pause merge operations on any failure
                 self._merge_paused_until = time.time() + MERGE_FAILURE_PAUSE_SEC
                 logger.warning(
                     f"[MERGE] ⚠️  Trading paused for {MERGE_FAILURE_PAUSE_SEC}s due to merge failure"
@@ -2373,6 +2428,31 @@ class PolymarketBot:
                 
                 # Fetch current balance
                 self.current_balance = await self.client.get_balance()
+                
+                # [SAFETY] FIX 5: Capital Recycling Priority
+                # If balance < $10, PAUSE scanning and prioritize merging existing full sets
+                # This ensures we recover liquidity before attempting new trades
+                if self.current_balance < 10.0:
+                    logger.warning(
+                        f"[CAPITAL_RECYCLING] ⚠️  Balance critically low: ${self.current_balance:.2f}\\n"
+                        f"  Threshold: $10.00\\n"
+                        f"  Action: PAUSING new trades, prioritizing merge operations\\n"
+                        f"  Objective: Recover liquidity from existing positions"
+                    )
+                    
+                    # Attempt to merge existing full sets
+                    try:
+                        await self._check_and_merge_positions()
+                        logger.info(
+                            f"[CAPITAL_RECYCLING] Merge attempt completed. "
+                            f"Will retry balance check on next iteration."
+                        )
+                    except Exception as merge_err:
+                        logger.error(f"[CAPITAL_RECYCLING] Merge failed: {merge_err}")
+                    
+                    # Skip to next iteration (don't scan for new opportunities)
+                    await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+                    continue
                 
                 # Calculate drawdown
                 if self.initial_balance:

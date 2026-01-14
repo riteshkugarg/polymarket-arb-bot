@@ -252,14 +252,27 @@ class ArbScanner:
             if not market_id or not condition_id:
                 return None
             
-            # [SAFETY] FIX 1: Skip Augmented NegRisk Markets (capital lock prevention)
-            # Augmented markets can lock capital indefinitely - skip them
-            if market.get('negRiskAugmented', False):
+            # [SAFETY] FIX 1: Enhanced Augmented NegRisk Filter
+            # Check BOTH enableNegRisk AND negRiskAugmented from Gamma API
+            # Per Polymarket team: Augmented markets require unnamed placeholders for merge
+            # Since we can't trade placeholders, we MUST skip these markets
+            enable_neg_risk = market.get('enableNegRisk', False)
+            neg_risk_augmented = market.get('negRiskAugmented', False)
+            
+            if enable_neg_risk and neg_risk_augmented:
                 logger.warning(
-                    f"[SAFETY] Skipping Augmented Market: {market_id[:8]}...\n"
-                    f"  Reason: negRiskAugmented=True (capital lock risk)"
+                    f"[SAFETY] Skipping Augmented NegRisk Market: {market_id[:8]}...\n"
+                    f"  Flags: enableNegRisk={enable_neg_risk}, negRiskAugmented={neg_risk_augmented}\n"
+                    f"  Reason: Requires unnamed placeholders for merge (capital lock risk)\n"
+                    f"  Action: $100 principal protection - SKIP"
                 )
                 return None
+            
+            # Log if standard NegRisk (tradeable)
+            if enable_neg_risk and not neg_risk_augmented:
+                logger.debug(
+                    f"[NegRisk] Market {market_id[:8]} is standard NegRisk (tradeable)"
+                )
             
             # Check market type - must be multi-outcome for arbitrage
             outcomes = market.get('outcomes', [])
@@ -385,6 +398,28 @@ class ArbScanner:
                     f"below threshold {MINIMUM_PROFIT_THRESHOLD}"
                 )
                 return None
+            
+            # [SAFETY] FIX 2: "Other" Outcome Verification for Full Set Merge
+            # For NegRisk markets, verify we have the "Other" token for complete partition
+            has_other_token = False
+            if is_negrisk:
+                for outcome in outcome_prices:
+                    if outcome.outcome_name.lower() in ['other', 'others', 'none of the above']:
+                        has_other_token = True
+                        logger.debug(
+                            f"[MERGE_READY] Market {market_id[:8]} has 'Other' token: "
+                            f"{outcome.token_id[:8]}..."
+                        )
+                        break
+                
+                if not has_other_token:
+                    logger.warning(
+                        f"[MERGE_INCOMPLETE] Skipping NegRisk market {market_id[:8]}\n"
+                        f"  Reason: Missing 'Other' outcome token\n"
+                        f"  Impact: Cannot form complete partition for merge\n"
+                        f"  Action: Skip to prevent partial position lock"
+                    )
+                    return None
             
             # Calculate required budget and max shares
             min_shares_for_profile = MIN_ORDER_BOOK_DEPTH
