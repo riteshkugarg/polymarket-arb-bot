@@ -359,6 +359,11 @@ class MarketMakingStrategy(BaseStrategy):
         
         Called by MarketDataManager when /user channel receives a fill.
         This provides instant inventory updates without polling.
+        
+        INSTITUTIONAL UPGRADE: IMMEDIATE CANCEL ON FILL
+        - On BID fill → immediately cancel ASK to prevent double-exposure
+        - On ASK fill → immediately cancel BID to prevent double-exposure
+        - This prevents the "fill-to-quote latency" race condition
         """
         try:
             # Find which position this fill belongs to
@@ -366,6 +371,35 @@ class MarketMakingStrategy(BaseStrategy):
                 if fill.order_id in position.active_bids.values() or fill.order_id in position.active_asks.values():
                     # This fill belongs to this market
                     is_buy = (fill.side.upper() == 'BUY')
+                    
+                    # CRITICAL: IMMEDIATE CANCEL ON FILL (High-Priority Callback)
+                    # Cancel opposite side BEFORE updating inventory to minimize exposure window
+                    if is_buy:
+                        # BID was filled → immediately cancel ASK to prevent double-long
+                        if fill.asset_id in position.active_asks:
+                            ask_order_id = position.active_asks[fill.asset_id]
+                            try:
+                                await self.client.cancel_order(ask_order_id)
+                                logger.warning(
+                                    f"🚨 IMMEDIATE CANCEL: ASK {ask_order_id[:8]}... cancelled "
+                                    f"after BID fill to prevent double-exposure"
+                                )
+                                del position.active_asks[fill.asset_id]
+                            except Exception as e:
+                                logger.error(f"Failed to cancel ASK on BID fill: {e}")
+                    else:
+                        # ASK was filled → immediately cancel BID to prevent double-short
+                        if fill.asset_id in position.active_bids:
+                            bid_order_id = position.active_bids[fill.asset_id]
+                            try:
+                                await self.client.cancel_order(bid_order_id)
+                                logger.warning(
+                                    f"🚨 IMMEDIATE CANCEL: BID {bid_order_id[:8]}... cancelled "
+                                    f"after ASK fill to prevent double-exposure"
+                                )
+                                del position.active_bids[fill.asset_id]
+                            except Exception as e:
+                                logger.error(f"Failed to cancel BID on ASK fill: {e}")
                     
                     # Update inventory immediately
                     position.update_inventory(
@@ -1004,6 +1038,22 @@ class MarketMakingStrategy(BaseStrategy):
             else:
                 inventory = position.inventory.get(token_id, 0)
             
+            # INSTITUTIONAL UPGRADE: PREDICTIVE TOXIC FLOW DETECTION
+            # Check micro-price deviation BEFORE being filled
+            # If micro_price deviates from mid_price by >1%, preemptively pull quotes
+            snapshot = self._market_data_manager.cache.get(token_id) if self._market_data_manager else None
+            if snapshot:
+                micro_deviation = abs(snapshot.micro_price - mid_price) / mid_price if mid_price > 0 else 0
+                if micro_deviation > 0.01:  # 1% deviation threshold
+                    logger.critical(
+                        f"🚨 PREDICTIVE TOXIC FLOW: {token_id[:8]}... - "
+                        f"Micro-price deviation {micro_deviation*100:.2f}% "
+                        f"(micro: {snapshot.micro_price:.4f}, mid: {mid_price:.4f}) - "
+                        f"PULLING QUOTES to avoid being swept"
+                    )
+                    # Skip placing quotes for this token - wait for market to stabilize
+                    continue
+            
             # Check for adverse selection via markout (institutional-grade)
             is_adverse = False
             if position.fill_count > 10:
@@ -1013,7 +1063,7 @@ class MarketMakingStrategy(BaseStrategy):
             
             # Calculate skewed quotes (Avellaneda-Stoikov) with protections
             combined_toxic = is_toxic or is_adverse
-            target_bid, target_ask = self._calculate_skewed_quotes(mid_price, inventory, combined_toxic)
+            target_bid, target_ask = self._calculate_skewed_quotes(mid_price, inventory, combined_toxic, position)
             
             # Position sizing
             bid_size = MM_BASE_POSITION_SIZE / target_bid if target_bid > 0 else 0
@@ -1090,8 +1140,14 @@ class MarketMakingStrategy(BaseStrategy):
         # Clamp to valid range
         return max(0.001, min(0.999, rounded))
     
-    def _calculate_skewed_quotes(self, mid_price: float, inventory: int, is_toxic: bool = False) -> Tuple[float, float]:
-        """Avellaneda-Stoikov inventory skewing with toxic flow protection"""
+    def _calculate_skewed_quotes(self, mid_price: float, inventory: int, is_toxic: bool = False, 
+                                 position: Optional[MarketPosition] = None) -> Tuple[float, float]:
+        """Avellaneda-Stoikov inventory skewing with toxic flow protection
+        
+        INSTITUTIONAL UPGRADE: Dynamic Spread Adjustment
+        - Automatically widens spreads if markout P&L is consistently negative
+        - Compensates for adverse selection without manual intervention
+        """
         RISK_FACTOR = 0.05  # 5 cents per 100 shares
         MIN_TICK_SIZE = 0.001  # Polymarket minimum tick (0.1 cent)
         
@@ -1107,6 +1163,23 @@ class MarketMakingStrategy(BaseStrategy):
         if is_toxic:
             base_half_spread *= 3.0  # 3x wider spread
             logger.warning(f"⚠️ TOXIC FLOW DETECTED - Widening spread to {base_half_spread*2*100:.1f}%")
+        
+        # INSTITUTIONAL UPGRADE: Adverse Selection Auto-Adjustment
+        # If markout P&L is consistently negative, we are being picked off
+        # Automatically widen spread to compensate
+        if position and position.fill_count > 10:  # Need statistical significance
+            avg_markout = position.total_markout_pnl / position.fill_count
+            
+            # Negative markout = adverse selection = need wider spreads
+            if avg_markout < -0.005:  # -0.5 cents per fill average
+                adverse_multiplier = 1.0 + abs(avg_markout) * 100  # Scale with severity
+                adverse_multiplier = min(adverse_multiplier, 2.5)  # Cap at 2.5x
+                base_half_spread *= adverse_multiplier
+                logger.warning(
+                    f"🚨 ADVERSE SELECTION AUTO-ADJUSTMENT: "
+                    f"Avg markout ${avg_markout:.4f} → spread widened {adverse_multiplier:.1f}x "
+                    f"to {base_half_spread*2*100:.1f}%"
+                )
         
         final_half_spread = base_half_spread + extra_spread
         

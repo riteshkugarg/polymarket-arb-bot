@@ -67,8 +67,14 @@ class MarketSnapshot:
     bids: List[Dict[str, Any]] = field(default_factory=list)
     asks: List[Dict[str, Any]] = field(default_factory=list)
     
-    def is_stale(self, threshold_seconds: float = 2.0) -> bool:
-        """Check if data hasn't been updated in threshold seconds"""
+    def is_stale(self, threshold_seconds: float = 0.5) -> bool:
+        """Check if data hasn't been updated in threshold seconds
+        
+        INSTITUTIONAL GRADE: 500ms threshold (was 2s)
+        - Most HFT systems use 100-250ms
+        - 500ms balances safety vs false positives
+        - Prevents quoting on stale data during connection hiccups
+        """
         return (time.time() - self.last_update) > threshold_seconds
     
     def to_dict(self) -> Dict[str, Any]:
