@@ -1288,4 +1288,39 @@ class MarketMakingStrategy(BaseStrategy):
         if self._allocated_capital <= 0:
             raise StrategyError("Invalid capital allocation for market making")
         logger.info("✅ MarketMaking configuration validated")
+    
+    # ============================================================================
+    # BaseStrategy Abstract Method Implementations
+    # ============================================================================
+    # Market making uses continuous run() loop instead of opportunity-based execution
+    # These methods are required by BaseStrategy but not used in practice
+    
+    async def analyze_opportunity(self, opportunity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Analyze market making opportunity (not used - strategy uses run() loop)
+        
+        Market making doesn't operate on discrete opportunities like arbitrage.
+        It continuously provides liquidity via the run() loop.
+        """
+        return None
+    
+    async def should_execute_trade(self, analysis: Dict[str, Any]) -> bool:
+        """
+        Check if trade should be executed (not used - strategy uses run() loop)
+        
+        Market making decisions are made internally via risk checks and quote updates.
+        """
+        return False
+    
+    async def execute(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute trade (not used - strategy uses run() loop)
+        
+        Market making execution happens via _place_quotes() and _exit_inventory().
+        This method exists only to satisfy BaseStrategy interface.
+        """
+        return {
+            'success': False,
+            'error': 'Market making uses run() loop, not execute() method'
+        }
 
