@@ -66,6 +66,7 @@ from config.constants import (
     ORDER_STATE_POLL_INTERVAL_SEC,
     BATCH_DELAYED_LEG_HOLD_SEC,
     CANCEL_DELAYED_ON_SHUTDOWN,
+    CLOB_API_URL,
 )
 from utils.logger import get_logger, setup_logging
 from utils.rebate_logger import get_rebate_logger
@@ -363,9 +364,9 @@ class PolymarketBot:
         try:
             tasks = []
             
-            # Run all strategies in background
-            for strategy in self.strategies:
-                tasks.append(asyncio.create_task(strategy.run()))
+            # Run arbitrage scanning loop in background
+            scan_task = asyncio.create_task(self._arbitrage_scan_loop())
+            tasks.append(scan_task)
 
             # Start production monitoring tasks (2026 safety features)
             heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -411,9 +412,11 @@ class PolymarketBot:
         # Stop all strategies
         for strategy in self.strategies:
             try:
-                await strategy.stop()
+                if hasattr(strategy, 'stop'):
+                    await strategy.stop()
             except Exception as e:
-                logger.error(f"Error stopping strategy {strategy.name}: {e}")
+                strategy_name = getattr(strategy, 'name', strategy.__class__.__name__)
+                logger.error(f"Error stopping strategy {strategy_name}: {e}")
 
     async def shutdown(self) -> None:
         """
@@ -476,7 +479,14 @@ class PolymarketBot:
             # Phase 1: Cancel all remaining open orders (graceful exit)
             try:
                 logger.info("Fetching open orders for cancellation...")
-                open_orders = await self.client.get_orders(status='open')
+                # Try to get open orders - method name varies by SDK version
+                if hasattr(self.client, 'get_open_orders'):
+                    open_orders = await self.client.get_open_orders()
+                elif hasattr(self.client._client, 'get_open_orders'):
+                    open_orders = await self.client._client.get_open_orders()
+                else:
+                    logger.warning("Cannot fetch open orders - method not available")
+                    open_orders = []
                 
                 if open_orders:
                     logger.info(f"Found {len(open_orders)} open orders - cancelling...")
@@ -2413,6 +2423,38 @@ class PolymarketBot:
             )
         except Exception as e:
             logger.warning(f"  ✗ Failed to cancel order {order_id[:8]}: {e}")
+
+    async def _arbitrage_scan_loop(self) -> None:
+        """
+        Main arbitrage scanning loop
+        
+        Continuously scans markets for arbitrage opportunities and executes them.
+        Uses ArbScanner to detect opportunities where sum(prices) < 0.98.
+        """
+        logger.info("[SCAN] Arbitrage scanner started")
+        
+        # Get the ArbScanner instance
+        arb_scanner = self.strategies[0] if self.strategies else None
+        if not arb_scanner:
+            logger.error("[SCAN] No ArbScanner found - cannot start scanning")
+            return
+        
+        while self.running:
+            try:
+                # Scan for arbitrage opportunities
+                opportunities = await arb_scanner.scan_markets()
+                
+                if opportunities:
+                    logger.info(f"[SCAN] Found {len(opportunities)} arbitrage opportunities")
+                    # Opportunities are executed atomically by AtomicDepthAwareExecutor
+                    # which is injected into the scanner's order manager
+                
+                # Wait before next scan
+                await asyncio.sleep(LOOP_INTERVAL_SEC)
+                
+            except Exception as e:
+                logger.error(f"[SCAN] Error in arbitrage scan loop: {e}", exc_info=True)
+                await asyncio.sleep(5)  # Brief pause on error
 
     async def _heartbeat_loop(self) -> None:
         """
