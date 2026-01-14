@@ -125,7 +125,8 @@ MAX_RETRIES: Final[int] = 3
 RETRY_BASE_DELAY: Final[float] = 1.0
 
 # Maximum backoff delay (seconds)
-MAX_BACKOFF_DELAY: Final[float] = 10.0
+# Production setting: 60s for resilience during API outages
+MAX_BACKOFF_DELAY: Final[float] = 60.0
 
 # ============================================================================
 # API RATE LIMITS (per Polymarket support - Jan 2026)
@@ -139,8 +140,6 @@ MAX_BACKOFF_DELAY: Final[float] = 10.0
 # Data API: 150 req/10s, 1500 req/10min
 # Gamma API: 300 req/10s, 3000 req/10min  
 # CLOB reads: 1500 req/10s, 15000 req/10min
-
-MAX_BACKOFF_DELAY: Final[float] = 60.0
 
 
 # ============================================================================
@@ -534,7 +533,9 @@ MM_MIN_LIQUIDITY: Final[float] = 5.0
 MM_MIN_DEPTH_SHARES: Final[float] = 5.0
 
 # Maximum spread to consider market liquid enough
-MM_MAX_SPREAD_PERCENT: Final[float] = 0.10  # 10% max spread
+# INSTITUTION-GRADE: 7% max (reduced from 10%)
+# Wider spreads = higher adverse selection risk
+MM_MAX_SPREAD_PERCENT: Final[float] = 0.07  # 7% max spread
 
 # Prefer binary markets (2 outcomes) for simplicity
 MM_PREFER_BINARY_MARKETS: Final[bool] = True
@@ -588,7 +589,9 @@ MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE: Final[float] = 100.0
 MM_ORACLE_PRICE_DEVIATION_LIMIT: Final[float] = 0.15  # 15% max deviation
 
 # Maximum time to hold inventory before force-liquidation (seconds)
-MM_MAX_INVENTORY_HOLD_TIME: Final[int] = 3600  # 1 hour
+# INSTITUTION-GRADE: 30 minutes (reduced from 1 hour)
+# Binary markets move fast - shorter hold time reduces directional risk
+MM_MAX_INVENTORY_HOLD_TIME: Final[int] = 1800  # 30 minutes
 
 # Position check interval (seconds)
 MM_POSITION_CHECK_INTERVAL: Final[int] = 30
