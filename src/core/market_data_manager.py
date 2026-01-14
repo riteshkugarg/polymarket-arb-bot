@@ -32,7 +32,7 @@ manager.register_fill_handler('market_making', mm_strategy.handle_fill)
 ```
 """
 
-from typing import Dict, Any, Optional, List, Callable, Set
+from typing import Dict, Any, Optional, List, Callable, Set, Tuple
 import asyncio
 import time
 import json
