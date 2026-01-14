@@ -63,9 +63,13 @@ logger = get_logger(__name__)
 
 
 # Configuration constants
-ARB_SCAN_INTERVAL_SEC = 3  # How often to scan for opportunities
+# FIX 2: Scan Latency - Current 3s polling is too slow for 2026 HFT environment
+# RECOMMENDED: Replace with WebSocket push architecture (listen to CLOB book channel)
+#              and trigger arb check on price updates only, not on blind timer.
+# INTERIM FIX: Reduce to 1s for improved latency (still sub-optimal vs websockets)
+ARB_SCAN_INTERVAL_SEC = 1  # How often to scan for opportunities (INTERIM - switch to WS)
 ARB_EXECUTION_COOLDOWN_SEC = 5  # Minimum time between executions
-ARB_MAX_CONSECUTIVE_FAILURES = 3  # Circuit breaker threshold
+ARB_MAX_CONSECUTIVE_FAILURES = 3  # Circuit breaker threshold (system errors only)
 ARB_OPPORTUNITY_REFRESH_LIMIT = 50  # Max markets to scan per iteration
 
 
@@ -147,15 +151,24 @@ class ArbitrageStrategy(BaseStrategy):
                     break
                 except Exception as e:
                     logger.error(f"Unexpected error in arb loop: {e}")
-                    self._consecutive_failures += 1
                     
-                    # Check circuit breaker
-                    if self._consecutive_failures >= ARB_MAX_CONSECUTIVE_FAILURES:
-                        self._circuit_breaker_active = True
-                        logger.error(
-                            f"⚠️  Circuit breaker activated after {self._consecutive_failures} failures"
+                    # FIX 3: Only system errors trigger circuit breaker, not market errors
+                    if self._is_system_error(e):
+                        self._consecutive_failures += 1
+                        logger.warning(
+                            f"System error detected (count: {self._consecutive_failures}/{ARB_MAX_CONSECUTIVE_FAILURES}): {e}"
                         )
-                        await asyncio.sleep(30)  # Back off for 30 seconds
+                        
+                        # Check circuit breaker
+                        if self._consecutive_failures >= ARB_MAX_CONSECUTIVE_FAILURES:
+                            self._circuit_breaker_active = True
+                            logger.error(
+                                f"🚨 Circuit breaker activated after {self._consecutive_failures} system errors"
+                            )
+                            await asyncio.sleep(30)  # Back off for 30 seconds
+                    else:
+                        # Market error (FOK rejection, price moved, etc.) - don't count toward circuit breaker
+                        logger.debug(f"Market error (not counting toward circuit breaker): {e}")
                         
         finally:
             self._is_running = False
@@ -312,20 +325,44 @@ class ArbitrageStrategy(BaseStrategy):
                 return ExecutionResult(
                     success=True,
                     market_id=opportunity.market_id,
+                    orders_executed=[o.order_id for o in result.orders if o.order_id],
+                    orders_failed=[],
                     total_cost=float(result.total_cost),
                     shares_filled=result.filled_shares,
                     actual_profit=profit,
                     error_message=""
                 )
             else:
-                # Log failure details
+                # FIX 1: Post-Execution Orphan Risk - Liquidate partial fills immediately
                 error_msg = f"Atomic execution failed at phase {result.execution_phase.value}"
                 if result.partial_fills:
-                    error_msg += f" (PARTIAL FILLS: {result.partial_fills})"
+                    error_msg += f" (PARTIAL FILLS DETECTED: {len(result.partial_fills)} orders)"
+                    logger.error(
+                        f"⚠️  ORPHAN RISK: {len(result.partial_fills)} legs filled but basket incomplete. "
+                        f"Initiating emergency liquidation..."
+                    )
+                    
+                    # Extract filled order details from result
+                    filled_legs = [
+                        (order.token_id, order.order_id, idx)
+                        for idx, order in enumerate(result.orders)
+                        if order.order_id in result.partial_fills
+                    ]
+                    
+                    # Call emergency liquidation to market-sell orphaned positions
+                    await self._revert_positions(
+                        execution_id=f"{opportunity.market_id}_{int(datetime.now().timestamp())}",
+                        filled_legs=filled_legs,
+                        shares=result.filled_shares
+                    )
+                    
+                    error_msg += " → Emergency liquidation completed"
                 
                 return ExecutionResult(
                     success=False,
                     market_id=opportunity.market_id,
+                    orders_executed=result.partial_fills,
+                    orders_failed=[o.order_id for o in result.orders if o.order_id not in result.partial_fills],
                     total_cost=0,
                     shares_filled=0,
                     actual_profit=0,
@@ -351,7 +388,7 @@ class ArbitrageStrategy(BaseStrategy):
         1. Sufficient budget remaining
         2. Not already executed recently
         3. Circuit breaker not active
-        4. Profit meets minimum threshold
+        4. ROI meets minimum threshold (0.3% = 30 basis points)
         
         Args:
             opportunity: ArbitrageOpportunity to check
@@ -363,9 +400,22 @@ class ArbitrageStrategy(BaseStrategy):
         if self._circuit_breaker_active:
             return False
         
-        # Check profit threshold
-        if opportunity.net_profit_per_share < 0.001:
-            return False
+        # FIX 4: Use minimum ROI % instead of flat dollar threshold
+        # Prevents locking up capital for negligible gains
+        MIN_ROI_PERCENT = 0.003  # 0.3% minimum ROI (30 basis points)
+        
+        if opportunity.required_budget > 0:
+            roi = opportunity.net_profit_per_share / opportunity.required_budget
+            if roi < MIN_ROI_PERCENT:
+                logger.debug(
+                    f"ROI too low: {roi*100:.3f}% < {MIN_ROI_PERCENT*100:.1f}% "
+                    f"(profit ${opportunity.net_profit_per_share:.4f} / budget ${opportunity.required_budget:.2f})"
+                )
+                return False
+        else:
+            # Fallback: if required_budget is 0 (edge case), use flat threshold
+            if opportunity.net_profit_per_share < 0.001:
+                return False
         
         # Check budget
         budget_remaining = self._get_budget_remaining()
@@ -379,6 +429,154 @@ class ArbitrageStrategy(BaseStrategy):
         
         return True
 
+    async def _revert_positions(
+        self,
+        execution_id: str,
+        filled_legs: List[tuple],
+        shares: float
+    ) -> None:
+        """
+        FIX 1: Emergency Liquidation for Post-Execution Orphan Risk
+        
+        If Phase 1 fills but Phase 2 fails, we're left with incomplete hedge.
+        Market-sell all filled positions immediately to return to cash.
+        
+        This prevents capital lock in un-hedged positions that guarantee loss.
+        
+        Args:
+            execution_id: Execution identifier for logging
+            filled_legs: List of (token_id, order_id, outcome_idx) that filled
+            shares: Number of shares to liquidate per leg
+        """
+        logger.warning(
+            f"[{execution_id}] 🚨 REVERTING POSITIONS: "
+            f"Market-selling {len(filled_legs)} orphaned legs to prevent loss"
+        )
+        
+        liquidation_tasks = []
+        
+        for token_id, order_id, outcome_idx in filled_legs:
+            async def liquidate_leg(tid, oid, idx):
+                try:
+                    # Get current order book for market sell
+                    book = await self.client.get_order_book(tid)
+                    bids = getattr(book, 'bids', [])
+                    
+                    if not bids:
+                        logger.error(
+                            f"[{execution_id}] No bids for {tid[:8]} - cannot revert"
+                        )
+                        return False
+                    
+                    # Market sell at best bid (accept 3% slippage for emergency)
+                    best_bid = float(bids[0]['price'])
+                    sell_price = max(0.01, best_bid * 0.97)
+                    
+                    result = await self.order_manager.execute_market_order(
+                        token_id=tid,
+                        side='SELL',
+                        size=shares,
+                        max_slippage=0.05,  # Accept 5% slippage for emergency exit
+                        is_shares=True
+                    )
+                    
+                    if result and result.get('success'):
+                        logger.info(
+                            f"[{execution_id}] ✅ Reverted leg {idx}: "
+                            f"{shares} shares @ ${sell_price:.4f}"
+                        )
+                        return True
+                    else:
+                        logger.error(
+                            f"[{execution_id}] ❌ Failed to revert leg {idx}"
+                        )
+                        return False
+                        
+                except Exception as e:
+                    logger.error(
+                        f"[{execution_id}] Reversion error for leg {idx}: {e}"
+                    )
+                    return False
+            
+            liquidation_tasks.append(liquidate_leg(token_id, order_id, outcome_idx))
+        
+        # Execute all liquidations concurrently
+        results = await asyncio.gather(*liquidation_tasks, return_exceptions=True)
+        
+        success_count = sum(1 for r in results if r is True)
+        logger.warning(
+            f"[{execution_id}] Position reversion complete: "
+            f"{success_count}/{len(filled_legs)} legs liquidated"
+        )
+        
+        if success_count < len(filled_legs):
+            logger.error(
+                f"[{execution_id}] ⚠️  INCOMPLETE REVERSION: "
+                f"{len(filled_legs) - success_count} legs still orphaned - manual intervention required"
+            )
+    
+    def _is_system_error(self, error: Exception) -> bool:
+        """
+        FIX 3: Distinguish system errors from market errors
+        
+        System Errors (trigger circuit breaker):
+        - API timeouts (429, 503, 504)
+        - Network failures
+        - Insufficient balance
+        - Authentication errors
+        
+        Market Errors (do NOT trigger circuit breaker):
+        - FOK order rejection (someone else hit the bid)
+        - Price moved (opportunity gone)
+        - Slippage exceeded
+        - Order book depth changed
+        
+        Args:
+            error: Exception that occurred
+            
+        Returns:
+            True if system error, False if market error
+        """
+        error_str = str(error).lower()
+        
+        # System error patterns
+        system_error_keywords = [
+            'timeout',
+            '429',  # Rate limit
+            '503',  # Service unavailable
+            '504',  # Gateway timeout
+            'connection',
+            'network',
+            'insufficient balance',
+            'authentication',
+            'unauthorized',
+            'api key',
+        ]
+        
+        # Market error patterns (normal trading conditions)
+        market_error_keywords = [
+            'fill-or-kill',
+            'fok',
+            'slippage',
+            'price moved',
+            'order rejected',
+            'insufficient depth',
+            'opportunity',
+        ]
+        
+        # Check for market errors first (more common)
+        for keyword in market_error_keywords:
+            if keyword in error_str:
+                return False  # Market error - don't trigger circuit breaker
+        
+        # Check for system errors
+        for keyword in system_error_keywords:
+            if keyword in error_str:
+                return True  # System error - count toward circuit breaker
+        
+        # Default: treat unknown errors as system errors (conservative)
+        return True
+    
     def _get_budget_remaining(self) -> Decimal:
         """Get remaining budget for arbitrage execution"""
         budget_status = self.executor.get_budget_status()
