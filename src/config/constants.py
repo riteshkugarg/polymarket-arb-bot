@@ -564,6 +564,10 @@ MM_MAX_LOSS_PER_POSITION: Final[float] = 3.0
 # Global daily loss limit - circuit breaker (USD)
 MM_GLOBAL_DAILY_LOSS_LIMIT: Final[float] = 50.0
 
+# Global directional exposure limit - correlation protection (USD)
+# Prevents excessive exposure to correlated markets
+MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE: Final[float] = 100.0
+
 # External oracle price deviation threshold (percentage)
 MM_ORACLE_PRICE_DEVIATION_LIMIT: Final[float] = 0.15  # 15% max deviation
 

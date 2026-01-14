@@ -71,6 +71,7 @@ from config.constants import (
     # Risk management
     MM_MAX_LOSS_PER_POSITION,
     MM_GLOBAL_DAILY_LOSS_LIMIT,
+    MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE,
     MM_ORACLE_PRICE_DEVIATION_LIMIT,
     MM_MAX_INVENTORY_HOLD_TIME,
     MM_POSITION_CHECK_INTERVAL,
@@ -327,11 +328,16 @@ class MarketMakingStrategy(BaseStrategy):
         self._oracle_prices: Dict[str, float] = {}  # market_id -> oracle_price
         self._oracle_enabled = False  # Enable when oracle integration ready
         
+        # Inventory defense mode (fast market protection)
+        self._inventory_defense_mode: Dict[str, float] = {}  # market_id -> end_time
+        self._defense_mode_duration = 60  # Stay in defense mode for 60 seconds
+        
         logger.info(
             f"MarketMakingStrategy initialized - "
             f"Capital: ${self._allocated_capital}, "
             f"Max markets: {MM_MAX_ACTIVE_MARKETS}, "
-            f"Target spread: {MM_TARGET_SPREAD*100:.1f}%"
+            f"Target spread: {MM_TARGET_SPREAD*100:.1f}%, "
+            f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}"
         )
     
     async def run(self) -> None:
@@ -405,6 +411,33 @@ class MarketMakingStrategy(BaseStrategy):
                 )
         
         logger.info(f"MarketMaking shutdown complete - Total P&L: ${self._total_pnl:.2f}")
+    
+    async def _calculate_total_directional_exposure(self) -> float:
+        """Calculate absolute net delta across all positions (correlation risk)"""
+        total_abs_exposure = 0.0
+        
+        for market_id, position in self._positions.items():
+            # Get current prices for valuation
+            prices = await self._get_market_prices(market_id, position.token_ids)
+            if not prices:
+                continue
+            
+            # For binary markets, use net inventory (Yes - No)
+            if len(position.token_ids) == 2:
+                net_inv = position.get_net_inventory()
+                # Value the net position at mid price
+                mid_price = sum(prices.values()) / len(prices) if prices else 0.5
+                exposure = abs(net_inv * mid_price)
+            else:
+                # Multi-outcome: sum absolute value of all positions
+                exposure = sum(
+                    abs(position.inventory.get(tid, 0) * prices.get(tid, 0.5))
+                    for tid in position.token_ids
+                )
+            
+            total_abs_exposure += exposure
+        
+        return total_abs_exposure
     
     async def _check_global_drawdown(self) -> bool:
         """Circuit breaker: Stop all activity if daily loss exceeds limit"""
@@ -600,15 +633,25 @@ class MarketMakingStrategy(BaseStrategy):
         return None
     
     async def _start_market_making(self, market: Dict) -> None:
-        """Start making market"""
+        """Start making market with global exposure check"""
         market_id = market.get('id')
         question = market.get('question', 'Unknown')
         tokens = market.get('tokens', [])
         token_ids = [t.get('token_id') for t in tokens]
         
+        # CRITICAL: Check global directional exposure before adding new position
+        total_exposure = await self._calculate_total_directional_exposure()
+        if total_exposure > MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE:
+            logger.warning(
+                f"⚠️ GLOBAL EXPOSURE LIMIT: ${total_exposure:.2f} exceeds "
+                f"${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE} - Skipping new market: {question[:40]}..."
+            )
+            return
+        
         logger.info(
             f"Starting market making: {question[:60]}... "
-            f"(volume: ${market.get('volume24hr', 0):.0f})"
+            f"(volume: ${market.get('volume24hr', 0):.0f}, "
+            f"current exposure: ${total_exposure:.2f})"
         )
         
         self._positions[market_id] = MarketPosition(market_id, question, token_ids)
@@ -689,7 +732,7 @@ class MarketMakingStrategy(BaseStrategy):
     
     async def _reconcile_order(self, token_id: str, side: str, target_price: float, 
                               target_size: float, current_order_id: Optional[str], 
-                              position: MarketPosition) -> Optional[str]:
+                              position: MarketPosition, market_id: str) -> Optional[str]:
         """Smart order reconciliation - preserves queue priority"""
         # Check if existing order is close enough (within 1 tick)
         if current_order_id:
@@ -742,12 +785,45 @@ class MarketMakingStrategy(BaseStrategy):
                     logger.warning(f"Failed to place {side}: {e}")
                     break
         
+        # CRITICAL: If all retries failed, enter INVENTORY DEFENSE MODE
+        # Market is moving too fast - stop trying to quote and focus on unwinding
+        logger.critical(
+            f"🚨 POST_ONLY DEADLOCK: {market_id[:8]}... - "
+            f"Failed {MAX_RETRIES} attempts to place {side} - "
+            f"ENTERING INVENTORY DEFENSE MODE (cancel all quotes, unwind only)"
+        )
+        self._inventory_defense_mode[market_id] = time.time() + self._defense_mode_duration
+        
         return None
     
     async def _place_quotes(self, market_id: str) -> None:
         """Place/update quotes using atomic dual-sided placement"""
         if time.time() - self._last_order_time < MM_MIN_ORDER_SPACING:
             await asyncio.sleep(MM_MIN_ORDER_SPACING)
+        
+        # CRITICAL: Check if in INVENTORY DEFENSE MODE
+        # If fast market prevented quoting, stop trying and focus on unwinding
+        if market_id in self._inventory_defense_mode:
+            defense_end = self._inventory_defense_mode[market_id]
+            if time.time() < defense_end:
+                logger.warning(
+                    f"⚠️ INVENTORY DEFENSE MODE active for {market_id[:8]}... - "
+                    f"Skipping quotes, unwinding only ({defense_end - time.time():.0f}s remaining)"
+                )
+                # Cancel all existing quotes
+                position = self._positions[market_id]
+                for order_id in list(position.active_bids.values()) + list(position.active_asks.values()):
+                    try:
+                        await self.client.cancel_order(order_id)
+                    except:
+                        pass
+                position.active_bids.clear()
+                position.active_asks.clear()
+                return
+            else:
+                # Defense mode expired - resume normal quoting
+                logger.info(f"✅ INVENTORY DEFENSE MODE ended for {market_id[:8]}... - Resuming quotes")
+                del self._inventory_defense_mode[market_id]
         
         # CRITICAL: Sync fills IMMEDIATELY before placing quotes
         # This prevents race condition where fills happen between sync cycles
@@ -810,10 +886,10 @@ class MarketMakingStrategy(BaseStrategy):
             current_ask_id = position.active_asks.get(token_id)
             
             bid_task = self._reconcile_order(
-                token_id, 'BUY', target_bid, bid_size, current_bid_id, position
+                token_id, 'BUY', target_bid, bid_size, current_bid_id, position, market_id
             )
             ask_task = self._reconcile_order(
-                token_id, 'SELL', target_ask, ask_size, current_ask_id, position
+                token_id, 'SELL', target_ask, ask_size, current_ask_id, position, market_id
             )
             
             # Execute simultaneously (prevents race condition)
@@ -966,6 +1042,21 @@ class MarketMakingStrategy(BaseStrategy):
                 await self._close_position(market_id)
                 continue
             
+            # CRITICAL: Check if position is HEDGED (equal Yes/No inventory)
+            # Don't exit both sides of a hedged position - only exit the imbalance
+            is_binary = len(position.token_ids) == 2
+            if is_binary:
+                inv_0 = position.inventory.get(position.token_ids[0], 0)
+                inv_1 = position.inventory.get(position.token_ids[1], 0)
+                
+                # If perfectly hedged (or nearly hedged within 5 shares), skip exit logic
+                if abs(inv_0 - inv_1) <= 5:
+                    logger.debug(
+                        f"Position is hedged: {market_id[:8]}... "
+                        f"(Yes: {inv_0}, No: {inv_1}, Net: {abs(inv_0 - inv_1)}) - No action needed"
+                    )
+                    continue
+            
             # Time-based: PASSIVE UNWINDING (not force close)
             if position.has_inventory():
                 age = position.get_inventory_age()
@@ -973,24 +1064,56 @@ class MarketMakingStrategy(BaseStrategy):
                     logger.warning(
                         f"Inventory age {age/60:.0f}min - passive unwinding"
                     )
-                    for token_id, inventory in position.inventory.items():
-                        if inventory != 0:
-                            await self._exit_inventory(market_id, token_id, inventory)
+                    
+                    # For binary markets, only unwind the NET imbalance
+                    if is_binary:
+                        net_inv = position.get_net_inventory()
+                        if abs(net_inv) > 5:  # Only if material imbalance
+                            # Determine which token to exit
+                            token_idx = 0 if net_inv > 0 else 1
+                            token_id = position.token_ids[token_idx]
+                            await self._exit_inventory(market_id, token_id, abs(net_inv))
+                    else:
+                        # Multi-outcome: exit each token independently
+                        for token_id, inventory in position.inventory.items():
+                            if inventory != 0:
+                                await self._exit_inventory(market_id, token_id, inventory)
                     continue
             
-            # Adverse price move: PASSIVE UNWINDING
-            for token_id, inventory in position.inventory.items():
-                if inventory > 0:
-                    entry_price = position.cost_basis[token_id]
-                    current_price = prices.get(token_id, entry_price)
-                    price_move = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+            # Adverse price move: PASSIVE UNWINDING (only for net imbalance)
+            if is_binary:
+                net_inv = position.get_net_inventory()
+                if abs(net_inv) > 5:
+                    # Check price move on the net position
+                    token_idx = 0 if net_inv > 0 else 1
+                    token_id = position.token_ids[token_idx]
+                    inventory = position.inventory.get(token_id, 0)
                     
-                    if price_move < -MM_EMERGENCY_EXIT_THRESHOLD:
-                        logger.critical(
-                            f"Emergency: {token_id[:8]}... price moved {price_move*100:.1f}% "
-                            f"- passive unwinding"
-                        )
-                        await self._exit_inventory(market_id, token_id, inventory)
+                    if inventory > 0:
+                        entry_price = position.cost_basis[token_id]
+                        current_price = prices.get(token_id, entry_price)
+                        price_move = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+                        
+                        if price_move < -MM_EMERGENCY_EXIT_THRESHOLD:
+                            logger.critical(
+                                f"Emergency: {token_id[:8]}... price moved {price_move*100:.1f}% "
+                                f"- passive unwinding NET imbalance ({abs(net_inv)} shares)"
+                            )
+                            await self._exit_inventory(market_id, token_id, abs(net_inv))
+            else:
+                # Multi-outcome: check each token
+                for token_id, inventory in position.inventory.items():
+                    if inventory > 0:
+                        entry_price = position.cost_basis[token_id]
+                        current_price = prices.get(token_id, entry_price)
+                        price_move = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+                        
+                        if price_move < -MM_EMERGENCY_EXIT_THRESHOLD:
+                            logger.critical(
+                                f"Emergency: {token_id[:8]}... price moved {price_move*100:.1f}% "
+                                f"- passive unwinding"
+                            )
+                            await self._exit_inventory(market_id, token_id, inventory)
     
     async def _should_close_position(self, position: MarketPosition) -> bool:
         """Check if position should be closed"""
@@ -1117,14 +1240,14 @@ class MarketMakingStrategy(BaseStrategy):
             
             current_bid_id = position.active_bids.get(token_id)
             new_bid_id = await self._reconcile_order(
-                token_id, 'BUY', target_bid, bid_size, current_bid_id, position
+                token_id, 'BUY', target_bid, bid_size, current_bid_id, position, market_id
             )
             if new_bid_id:
                 position.active_bids[token_id] = new_bid_id
             
             current_ask_id = position.active_asks.get(token_id)
             new_ask_id = await self._reconcile_order(
-                token_id, 'SELL', target_ask, ask_size, current_ask_id, position
+                token_id, 'SELL', target_ask, ask_size, current_ask_id, position, market_id
             )
             if new_ask_id:
                 position.active_asks[token_id] = new_ask_id
