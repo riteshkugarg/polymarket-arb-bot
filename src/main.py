@@ -277,8 +277,7 @@ class PolymarketBot:
             # Initialize arbitrage scanner (not the abstract ArbitrageStrategy)
             arb_strategy = ArbScanner(
                 self.client,
-                self.order_manager,
-                atomic_executor=self.atomic_executor
+                self.order_manager
             )
             self.strategies.append(arb_strategy)
             
@@ -2998,8 +2997,9 @@ class PolymarketBot:
                 current_nonce = await self.client._client.get_nonce()
             else:
                 # Fallback: fetch from /nonce endpoint
+                clob_host = getattr(self.client._client, 'host', 'https://clob.polymarket.com')
                 async with self.client._session.get(
-                    f"{self.client._client.clob_url}/nonce"
+                    f"{clob_host}/nonce"
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
