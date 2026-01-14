@@ -40,7 +40,7 @@ Integration:
 - Can be toggled on/off via config flag
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 import asyncio
 from datetime import datetime
 from decimal import Decimal
@@ -178,6 +178,96 @@ class ArbitrageStrategy(BaseStrategy):
         except Exception as e:
             logger.error(f"Error handling arbitrage fill event: {e}", exc_info=True)
 
+    # ========================================================================
+    # BaseStrategy Abstract Method Implementations
+    # ========================================================================
+    
+    async def execute(self) -> None:
+        """
+        Main strategy execution - delegates to run() method
+        Required by BaseStrategy interface
+        """
+        await self.run()
+    
+    async def analyze_opportunity(self) -> Optional[Dict[str, Any]]:
+        """
+        Analyze market for arbitrage opportunities
+        Required by BaseStrategy interface
+        
+        Returns:
+            Dictionary with best opportunity details or None
+        """
+        try:
+            opportunities = await self.scanner.scan_markets(limit=ARB_OPPORTUNITY_REFRESH_LIMIT)
+            
+            if not opportunities:
+                return None
+            
+            # Filter executable opportunities
+            executable = [opp for opp in opportunities if self._is_opportunity_executable(opp)]
+            
+            if not executable:
+                return None
+            
+            # Return best opportunity
+            top_opp = executable[0]
+            return {
+                'action': 'BUY_ALL_OUTCOMES',
+                'market_id': top_opp.market_id,
+                'size': top_opp.max_shares_to_buy,
+                'confidence': min(top_opp.arbitrage_profit_pct / 5.0, 1.0),  # 5% = 100% confidence
+                'metadata': {
+                    'sum_prices': float(top_opp.sum_prices),
+                    'expected_profit': float(top_opp.expected_profit),
+                    'profit_pct': float(top_opp.arbitrage_profit_pct),
+                    'outcome_count': len(top_opp.outcomes)
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error analyzing opportunities: {e}", exc_info=True)
+            return None
+    
+    async def should_execute_trade(self, opportunity: Dict[str, Any]) -> bool:
+        """
+        Determine if opportunity should be executed
+        Required by BaseStrategy interface
+        
+        Args:
+            opportunity: Opportunity details from analyze_opportunity()
+            
+        Returns:
+            True if should execute, False otherwise
+        """
+        try:
+            # Check circuit breaker
+            if self._circuit_breaker_active:
+                return False
+            
+            # Check execution cooldown
+            time_since_last = datetime.now().timestamp() - self._last_execution_time
+            if time_since_last < ARB_EXECUTION_COOLDOWN_SEC:
+                return False
+            
+            # Check budget
+            if self._get_budget_remaining() < Decimal('10'):
+                logger.warning("Insufficient budget remaining")
+                return False
+            
+            # Check confidence threshold
+            confidence = opportunity.get('confidence', 0)
+            if confidence < 0.2:  # Minimum 20% confidence (1% profit)
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking trade execution: {e}", exc_info=True)
+            return False
+
+    # ========================================================================
+    # Event-Driven Strategy Implementation
+    # ========================================================================
+    
     async def run(self) -> None:
         """
         EVENT-DRIVEN Strategy - Subscribe to price updates instead of polling
