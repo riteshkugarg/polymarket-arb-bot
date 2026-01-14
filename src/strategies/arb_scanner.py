@@ -325,6 +325,258 @@ class ArbScanner:
         except:
             return None
 
+    async def scan_events(
+        self,
+        events: Optional[List[Dict[str, Any]]] = None,
+        limit: int = 100
+    ) -> List[ArbitrageOpportunity]:
+        """
+        Scan events for multi-outcome arbitrage opportunities (INSTITUTION-GRADE 2026)
+        
+        Per Polymarket Support (Jan 2026):
+        - Multi-outcome arbitrage works across EVENTS, not individual markets
+        - Each event contains multiple binary markets (Yes/No)
+        - Arbitrage exists when sum(YES prices across all markets) < $1.00
+        - Must validate against ORDER BOOK DEPTH, not just midpoint prices
+        - Handle NegRisk events (winner-take-all, unnamed placeholders)
+        
+        Example:
+            Event: "2024 US Presidential Election"
+            Markets within event:
+              - Trump market: YES price = $0.45 (from order book ASK)
+              - Biden market: YES price = $0.35 (from order book ASK)  
+              - Harris market: YES price = $0.15 (from order book ASK)
+            Sum of YES prices: $0.95
+            Arbitrage profit: $1.00 - $0.95 = $0.05 per complete set
+            
+        Strategy:
+        1. For each event with 3+ outcomes
+        2. Fetch order book for EACH market's YES outcome  
+        3. Calculate sum of best ASK prices (actual entry cost)
+        4. If sum < $0.98, validate depth and create opportunity
+        5. Return sorted by ROI (net_profit / required_budget)
+        
+        Args:
+            events: List of event objects from get_events() (None = fetch fresh)
+            limit: Maximum events to scan
+            
+        Returns:
+            List of ArbitrageOpportunity objects sorted by profitability
+        """
+        opportunities = []
+        
+        try:
+            # Fetch events if not provided
+            if events is None:
+                logger.debug("Fetching multi-outcome events for arbitrage scanning...")
+                response = await self.client.get_events(
+                    limit=limit,
+                    closed=False,
+                    active=True
+                )
+                events = response.get('data', [])
+            
+            logger.debug(f"Scanning {len(events[:limit])} events for arbitrage opportunities")
+            
+            # Track statistics for diagnostic logging
+            events_scanned = 0
+            events_with_arb = 0
+            best_near_miss = None
+            best_sum = 1.0
+            
+            # Scan each event
+            for event in events[:limit]:
+                events_scanned += 1
+                
+                try:
+                    # Skip binary events (only 2 outcomes)
+                    outcomes = event.get('outcomes', [])
+                    if len(outcomes) < 3:
+                        continue
+                    
+                    # Skip NegRisk events with unnamed placeholders
+                    if event.get('negRisk', False):
+                        named_outcomes = [o for o in outcomes if o and len(o) > 0]
+                        if len(named_outcomes) < len(outcomes):
+                            logger.debug(f"Skipping NegRisk event with unnamed placeholders: {event.get('id')}")
+                            continue
+                    
+                    # Check event for arbitrage
+                    arb_opp = await self._check_event_for_arbitrage(event)
+                    
+                    if arb_opp:
+                        opportunities.append(arb_opp)
+                        events_with_arb += 1
+                    else:
+                        # Track closest near-miss
+                        event_sum = self._get_event_sum_prices(event)
+                        if event_sum and FINAL_THRESHOLD <= event_sum < best_sum:
+                            best_sum = event_sum
+                            best_near_miss = event.get('title', 'Unknown')[:60]
+                            
+                except Exception as e:
+                    logger.debug(f"Error scanning event {event.get('id', 'unknown')}: {e}")
+                    continue
+            
+            # Sort by ROI (profit per dollar invested)
+            opportunities.sort(
+                key=lambda x: (x.net_profit_per_share / x.required_budget) if x.required_budget > 0 else 0,
+                reverse=True
+            )
+            
+            logger.info(
+                f"Event scan complete: {events_with_arb} opportunities found "
+                f"({events_scanned} events scanned, threshold: sum < {FINAL_THRESHOLD})"
+            )
+            
+            # Log closest near-miss for market insight
+            if not opportunities and best_near_miss:
+                logger.info(
+                    f"  Closest opportunity: sum={best_sum:.4f} "
+                    f"(need < {FINAL_THRESHOLD:.2f}) - {best_near_miss}"
+                )
+            
+            return opportunities
+            
+        except Exception as e:
+            logger.error(f"Event scan failed: {e}", exc_info=True)
+            return []
+
+    def _get_event_sum_prices(self, event: Dict[str, Any]) -> Optional[float]:
+        """
+        Quick sum of outcome prices from event (for near-miss diagnostics)
+        Uses outcomePrices array if available
+        """
+        try:
+            prices = event.get('outcomePrices', [])
+            if len(prices) < 3:
+                return None
+            return sum(float(p) for p in prices)
+        except:
+            return None
+
+    async def _check_event_for_arbitrage(
+        self,
+        event: Dict[str, Any]
+    ) -> Optional[ArbitrageOpportunity]:
+        """
+        Check single event for multi-outcome arbitrage opportunity
+        
+        Per Polymarket Support:
+        - Fetch order book for each market within event
+        - Use best ASK price (actual purchase cost), NOT midpoint
+        - Validate sufficient depth on ALL legs before accepting opportunity
+        - Calculate smart slippage based on depth per leg
+        
+        Args:
+            event: Event data from /events API
+            
+        Returns:
+            ArbitrageOpportunity if valid, None otherwise
+        """
+        try:
+            event_id = event.get('id', 'unknown')
+            outcomes = event.get('outcomes', [])
+            token_ids = event.get('clobTokenIds', [])
+            
+            # Validation: Must have same number of outcomes and token IDs
+            if len(outcomes) != len(token_ids):
+                logger.debug(
+                    f"Skipping event {event_id}: outcome/token mismatch "
+                    f"({len(outcomes)} outcomes, {len(token_ids)} tokens)"
+                )
+                return None
+            
+            # Fetch order books for ALL outcomes (with depth validation)
+            outcome_prices: List[OutcomePrice] = []
+            total_ask_sum = Decimal('0')
+            
+            for i, (outcome_name, token_id) in enumerate(zip(outcomes, token_ids)):
+                try:
+                    # Get order book (from cache or REST)
+                    order_book = await self._get_cached_order_book(token_id)
+                    
+                    if not order_book or 'asks' not in order_book:
+                        logger.debug(f"Skipping {event_id}: no asks for outcome {outcome_name}")
+                        return None
+                    
+                    asks = order_book['asks']
+                    if not asks or len(asks) == 0:
+                        logger.debug(f"Skipping {event_id}: empty ask book for {outcome_name}")
+                        return None
+                    
+                    # Get best ask (actual purchase price)
+                    best_ask = Decimal(str(asks[0]['price']))
+                    available_depth = Decimal(str(asks[0]['size']))
+                    
+                    # Validate minimum depth
+                    if available_depth < MIN_ORDER_BOOK_DEPTH:
+                        logger.debug(
+                            f"Skipping {event_id}: insufficient depth on {outcome_name} "
+                            f"({available_depth} < {MIN_ORDER_BOOK_DEPTH})"
+                        )
+                        return None
+                    
+                    # Calculate smart slippage for this leg
+                    slippage = self._calculate_smart_slippage(float(available_depth))
+                    
+                    outcome_prices.append(OutcomePrice(
+                        outcome_name=outcome_name,
+                        token_id=token_id,
+                        price=best_ask,
+                        available_depth=available_depth,
+                        slippage_tolerance=Decimal(str(slippage))
+                    ))
+                    
+                    total_ask_sum += best_ask
+                    
+                except Exception as e:
+                    logger.debug(f"Error fetching order book for {outcome_name}: {e}")
+                    return None
+            
+            # Check if arbitrage exists (sum of asks < threshold)
+            if total_ask_sum >= Decimal(str(FINAL_THRESHOLD)):
+                return None  # No arbitrage
+            
+            # Calculate profit metrics
+            profit_per_share = Decimal('1.0') - total_ask_sum
+            net_profit_per_share = profit_per_share - Decimal(str(sum(op.slippage_tolerance for op in outcome_prices)))
+            
+            # Skip if net profit too small
+            if net_profit_per_share <= Decimal('0.001'):
+                return None
+            
+            # Calculate max shares based on depth
+            min_depth = min(op.available_depth for op in outcome_prices)
+            max_shares = min(
+                float(min_depth),
+                MAX_ARBITRAGE_BUDGET_PER_BASKET / float(total_ask_sum)
+            )
+            
+            required_budget = min(
+                MIN_ARBITRAGE_BUDGET_PER_BASKET,
+                max_shares * float(total_ask_sum)
+            )
+            
+            # Create opportunity
+            return ArbitrageOpportunity(
+                market_id=event_id,
+                condition_id=event.get('conditionId', event_id),
+                market_type=MarketType.NEGRISK if event.get('negRisk') else MarketType.STANDARD,
+                outcomes=outcome_prices,
+                sum_prices=total_ask_sum,
+                profit_per_share=profit_per_share,
+                net_profit_per_share=net_profit_per_share,
+                required_budget=required_budget,
+                max_shares_to_buy=max_shares,
+                expected_profit=float(net_profit_per_share) * max_shares,
+                arbitrage_profit_pct=float(profit_per_share / total_ask_sum * 100)
+            )
+            
+        except Exception as e:
+            logger.error(f"Error checking event for arbitrage: {e}", exc_info=True)
+            return None
+
     async def _get_cached_order_book(self, token_id: str):
         """
         2026 UPGRADE: Get order book from WebSocket cache or REST fallback

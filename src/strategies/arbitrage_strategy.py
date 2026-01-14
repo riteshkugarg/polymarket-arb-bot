@@ -124,6 +124,7 @@ class ArbitrageStrategy(BaseStrategy):
         
         # Event-driven architecture state
         self._arb_eligible_markets: Set[str] = set()  # Asset IDs that are arb-eligible
+        self._arb_eligible_events: List[Dict[str, Any]] = []  # Multi-outcome events for arbitrage
         self._pending_scan = False  # Debounce flag to prevent duplicate scans
         self._scan_lock = asyncio.Lock()
         self._market_making_strategy: Optional[Any] = None  # Reference for cross-strategy coordination
@@ -198,7 +199,11 @@ class ArbitrageStrategy(BaseStrategy):
             Dictionary with best opportunity details or None
         """
         try:
-            opportunities = await self.scanner.scan_markets(limit=ARB_OPPORTUNITY_REFRESH_LIMIT)
+            # Use cached events for faster scanning
+            opportunities = await self.scanner.scan_events(
+                events=self._arb_eligible_events,
+                limit=ARB_OPPORTUNITY_REFRESH_LIMIT
+            )
             
             if not opportunities:
                 return None
@@ -343,40 +348,104 @@ class ArbitrageStrategy(BaseStrategy):
         logger.info("✅ Cross-strategy coordination enabled with MarketMakingStrategy")
     
     async def _discover_arb_eligible_markets(self) -> None:
-        """Discover all multi-outcome markets (3+ outcomes) for arb eligibility"""
+        """
+        Discover multi-outcome arbitrage opportunities using Events API
+        
+        Per Polymarket Support (Jan 2026):
+        - Multi-outcome markets are structured as EVENTS containing multiple binary MARKETS
+        - Each market in an event is binary (Yes/No), prices sum to $1 within each market
+        - Arbitrage opportunity: sum(YES prices across all markets in event) < $1.00
+        - Use /events endpoint, not /markets
+        - Filter by outcomes array length (>= 3 for multi-outcome)
+        - Handle NegRisk events (winner-take-all, can have augmented placeholders)
+        
+        Example Event Structure:
+            Event: "2024 US Presidential Election"
+            Markets: [
+                {outcome: "Trump", price: $0.45},
+                {outcome: "Biden", price: $0.35},
+                {outcome: "Harris", price: $0.15}
+            ]
+            Sum of YES prices: $0.45 + $0.35 + $0.15 = $0.95
+            Arbitrage profit: $1.00 - $0.95 = $0.05 per share
+        """
         try:
-            logger.info("Discovering arb-eligible markets...")
+            logger.info("Discovering multi-outcome arbitrage events...")
             
-            # Fetch all active markets
-            response = await self.client.get_markets()
-            markets = response.get('data', [])
+            # Fetch events with pagination (per Polymarket support, must specify limit)
+            all_events = []
+            offset = 0
+            limit = 100
             
-            logger.debug(f"Fetched {len(markets)} total markets from API")
+            while True:
+                response = await self.client.get_events(
+                    limit=limit,
+                    offset=offset,
+                    closed=False,  # Only active events
+                    active=True
+                )
+                
+                events = response.get('data', [])
+                if not events:
+                    break  # No more events
+                
+                all_events.extend(events)
+                offset += limit
+                
+                # Safety: Cap at 500 events to avoid excessive API calls
+                if len(all_events) >= 500:
+                    logger.info("Reached 500 event limit - stopping discovery")
+                    break
             
-            # Sample first market to understand structure
-            if markets and len(markets) > 0:
-                sample = markets[0]
+            logger.debug(f"Fetched {len(all_events)} total events from Gamma API")
+            
+            # Sample first event to understand structure (debugging)
+            if all_events:
+                sample = all_events[0]
                 logger.debug(
-                    f"Sample market structure - tokens: {len(sample.get('tokens', []))}, "
-                    f"clobTokenIds: {len(sample.get('clobTokenIds', []))}, "
-                    f"keys: {list(sample.keys())[:10]}"
+                    f"Sample event structure:\n"
+                    f"  - outcomes: {len(sample.get('outcomes', []))}\n"
+                    f"  - markets: {len(sample.get('markets', []))}\n"
+                    f"  - clobTokenIds: {len(sample.get('clobTokenIds', []))}\n"
+                    f"  - negRisk: {sample.get('negRisk', False)}\n"
+                    f"  - keys: {list(sample.keys())[:15]}"
                 )
             
-            # Filter for multi-outcome markets (3+ outcomes)
-            multi_outcome_count = 0
-            for market in markets:
-                tokens = market.get('tokens', [])
-                if len(tokens) >= 3:
-                    multi_outcome_count += 1
-                    # Add all token IDs to subscription list
-                    token_ids = market.get('clobTokenIds', [])
-                    for token_id in token_ids:
-                        self._arb_eligible_markets.add(token_id)
+            # Filter for multi-outcome events (3+ outcomes)
+            multi_outcome_events = []
+            for event in all_events:
+                outcomes = event.get('outcomes', [])
+                
+                # Skip binary events (only 2 outcomes)
+                if len(outcomes) < 3:
+                    continue
+                
+                # Skip NegRisk augmented events with unnamed placeholders
+                # Per Polymarket support: Only trade named outcomes
+                if event.get('negRisk', False):
+                    # Check if any outcomes are unnamed/placeholders
+                    named_outcomes = [o for o in outcomes if o and len(o) > 0]
+                    if len(named_outcomes) < len(outcomes):
+                        logger.debug(
+                            f"Skipping NegRisk event {event.get('id')} with unnamed placeholders"
+                        )
+                        continue
+                
+                multi_outcome_events.append(event)
+                
+                # Subscribe to all token IDs in this event
+                token_ids = event.get('clobTokenIds', [])
+                for token_id in token_ids:
+                    self._arb_eligible_markets.add(token_id)
             
             logger.info(
                 f"Discovered {len(self._arb_eligible_markets)} arb-eligible assets "
-                f"across {multi_outcome_count} multi-outcome markets (out of {len(markets)} total)"
+                f"across {len(multi_outcome_events)} multi-outcome events "
+                f"(out of {len(all_events)} total events)"
             )
+            
+            # Store events for arb scanning
+            self._arb_eligible_events = multi_outcome_events
             
         except Exception as e:
             logger.error(f"Failed to discover arb-eligible markets: {e}", exc_info=True)
@@ -413,16 +482,28 @@ class ArbitrageStrategy(BaseStrategy):
 
     async def _arb_scan_loop(self) -> None:
         """
-        Main arbitrage scanning loop
+        Main arbitrage scanning loop (INSTITUTION-GRADE 2026)
         
-        1. Scan markets for opportunities
-        2. Filter by profitability
-        3. Execute top opportunities atomically
-        4. Update metrics and budget
+        Per Polymarket Support:
+        - Scan EVENTS for multi-outcome arbitrage (not individual markets)
+        - Validate against order book depth (not just midpoint prices)
+        - Execute top opportunities atomically with FOK logic
+        - Cross-strategy coordination for inventory management
+        
+        Flow:
+        1. Scan cached events for arbitrage opportunities
+        2. Filter by profitability and execution readiness
+        3. Prioritize by MM inventory reduction (if coordinated)
+        4. Execute top opportunity atomically
+        5. Update metrics and budget tracking
         """
         try:
-            # Scan for opportunities
-            opportunities = await self.scanner.scan_markets(limit=ARB_OPPORTUNITY_REFRESH_LIMIT)
+            # Use cached arb-eligible events (discovered at startup)
+            # This avoids re-fetching events on every price update
+            opportunities = await self.scanner.scan_events(
+                events=self._arb_eligible_events,
+                limit=ARB_OPPORTUNITY_REFRESH_LIMIT
+            )
             
             if not opportunities:
                 return  # No opportunities this iteration

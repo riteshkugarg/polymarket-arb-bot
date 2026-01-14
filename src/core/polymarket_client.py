@@ -319,6 +319,105 @@ class PolymarketClient:
             logger.error(f"Failed to fetch market {condition_id}: {e}")
             raise APIError(f"Failed to fetch market: {e}")
 
+    @async_retry_with_backoff(max_retries=MAX_RETRIES)
+    async def get_events(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        closed: bool = False,
+        active: bool = True,
+        tag_id: Optional[str] = None,
+        order: str = "id",
+        ascending: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Get list of events from Gamma API (for multi-outcome arbitrage)
+        
+        Per Polymarket Support (Jan 2026):
+        - Events contain multiple Markets (each market is binary Yes/No)
+        - Multi-outcome arbitrage works across markets within one event
+        - Use outcomes array length to identify multi-outcome events
+        - Pagination via limit/offset (no default limit - must specify)
+        - Rate limit: 500 req/10s
+        
+        Args:
+            limit: Results per page (default 100, max recommended: 100)
+            offset: Starting position for pagination
+            closed: Include closed events (default False)
+            active: Only active events (default True)
+            tag_id: Filter by category tag
+            order: Sort field (default "id")
+            ascending: Sort direction (default False = newest first)
+            
+        Returns:
+            {
+                'data': [
+                    {
+                        'id': str,
+                        'title': str,
+                        'slug': str,
+                        'markets': [...]  # List of binary markets in this event
+                        'clobTokenIds': [...]  # All token IDs across markets
+                        'outcomes': [...]  # Outcome labels
+                        'outcomePrices': [...]  # Current prices
+                        'volume': float,
+                        'liquidity': float,
+                        'negRisk': bool,  # Is this a NegRisk event?
+                        ...
+                    }
+                ],
+                'count': int,
+                'limit': int,
+                'offset': int
+            }
+        
+        Example multi-outcome event:
+            Event: "2024 US Presidential Election"
+            Markets: [Trump market, Biden market, Harris market, ...]
+            Arbitrage: If sum(YES_prices) < $1.00, profit opportunity exists
+        """
+        try:
+            url = f"{POLYMARKET_GAMMA_API_URL}/events"
+            
+            params = {
+                'limit': limit,
+                'offset': offset,
+                'closed': str(closed).lower(),
+                'active': str(active).lower(),
+                'order': order,
+                'ascending': str(ascending).lower()
+            }
+            
+            if tag_id:
+                params['tag_id'] = tag_id
+            
+            logger.debug(f"Fetching events from Gamma API: {params}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=API_TIMEOUT_SEC)) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    
+                    events_count = len(data) if isinstance(data, list) else len(data.get('data', []))
+                    logger.debug(f"Retrieved {events_count} events from Gamma API")
+                    
+                    # Normalize response format (Gamma API returns array directly)
+                    if isinstance(data, list):
+                        return {
+                            'data': data,
+                            'count': len(data),
+                            'limit': limit,
+                            'offset': offset
+                        }
+                    return data
+                    
+        except aiohttp.ClientResponseError as e:
+            logger.error(f"Gamma API error fetching events: HTTP {e.status}")
+            raise APIError(f"Failed to fetch events: HTTP {e.status}")
+        except Exception as e:
+            logger.error(f"Failed to fetch events: {e}", exc_info=True)
+            raise APIError(f"Failed to fetch events: {e}")
+
     async def validate_tokens_bulk(
         self,
         token_ids: List[str],
