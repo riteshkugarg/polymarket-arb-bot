@@ -515,7 +515,9 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 # Market Selection
 # -----------------
 # Minimum 24h volume to consider for market making (USD)
-MM_MIN_MARKET_VOLUME_24H: Final[float] = 500.0
+# Per Polymarket Support (Jan 2026): Lowered from $500 to $100
+# Rationale: More markets available, bot can be selective with spread/liquidity checks
+MM_MIN_MARKET_VOLUME_24H: Final[float] = 100.0
 
 # Maximum spread to consider market liquid enough
 MM_MAX_SPREAD_PERCENT: Final[float] = 0.10  # 10% max spread
