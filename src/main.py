@@ -29,6 +29,7 @@ from core.maker_executor import get_maker_executor
 from strategies.arbitrage_strategy import ArbitrageStrategy
 from strategies.arb_scanner import ArbScanner
 from strategies.market_making_strategy import MarketMakingStrategy
+from core.market_data_manager import MarketDataManager
 from config.constants import (
     LOOP_INTERVAL_SEC,
     HEALTH_CHECK_INTERVAL_SEC,
@@ -277,6 +278,22 @@ class PolymarketBot:
             self.atomic_executor = AtomicDepthAwareExecutor(self.client, self.order_manager)
             logger.info("AtomicDepthAwareExecutor initialized")
             
+            # WEBSOCKET ARCHITECTURE: Initialize centralized market data manager
+            try:
+                self.market_data_manager = MarketDataManager(
+                    client=self.client,
+                    stale_threshold=2.0,  # 2-second staleness protection
+                    ws_url="wss://ws-subscriptions-clob.polymarket.com/ws/market"
+                )
+                await self.market_data_manager.initialize()
+                logger.info("✅ MarketDataManager initialized - WebSocket architecture active")
+            except Exception as ws_error:
+                logger.warning(
+                    f"⚠️  MarketDataManager initialization failed: {ws_error} - "
+                    f"Falling back to REST polling"
+                )
+                self.market_data_manager = None
+            
             # Initialize arbitrage scanner (not the abstract ArbitrageStrategy)
             arb_strategy = ArbScanner(
                 self.client,
@@ -287,10 +304,11 @@ class PolymarketBot:
             # Initialize market making strategy (runs in parallel with arbitrage)
             market_making_strategy = MarketMakingStrategy(
                 self.client,
-                self.order_manager
+                self.order_manager,
+                market_data_manager=self.market_data_manager  # Pass WebSocket manager
             )
             self.strategies.append(market_making_strategy)
-            logger.info("✅ Market Making Strategy initialized (runs parallel with arbitrage)")
+            logger.info("✅ Market Making Strategy initialized (WebSocket + REST hybrid mode)")
             
             # UPGRADE 2: Initialize Web3 for NegRisk adapter interactions
             try:
@@ -438,12 +456,22 @@ class PolymarketBot:
         Features (2026 Production Safety):
         - Cancels all open orders gracefully
         - Stops all strategies
+        - Closes WebSocket connections
         - Closes client connections
         - Logs final statistics
         """
         logger.info("Shutting down bot...")
         
         try:
+            # Shutdown WebSocket manager first (stop receiving new data)
+            if hasattr(self, 'market_data_manager') and self.market_data_manager:
+                logger.info("Shutting down WebSocket manager...")
+                try:
+                    await self.market_data_manager.shutdown()
+                    logger.info("✅ WebSocket manager stopped")
+                except Exception as e:
+                    logger.error(f"Error shutting down WebSocket manager: {e}")
+            
             # HFT FIX 5: Clean Exit Strategy - Check for DELAYED orders first
             if CANCEL_DELAYED_ON_SHUTDOWN and self._pending_orders:
                 logger.warning(

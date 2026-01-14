@@ -50,6 +50,7 @@ from strategies.arb_scanner import ArbScanner, AtomicExecutor, ArbitrageOpportun
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
 from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor, ExecutionPhase
+from core.market_data_manager import MarketDataManager, FillEvent
 from config.constants import (
     PROXY_WALLET_ADDRESS,
     API_TIMEOUT_SEC,
@@ -90,7 +91,8 @@ class ArbitrageStrategy(BaseStrategy):
         client: PolymarketClient,
         order_manager: OrderManager,
         config: Optional[Dict[str, Any]] = None,
-        atomic_executor: Optional[AtomicDepthAwareExecutor] = None
+        atomic_executor: Optional[AtomicDepthAwareExecutor] = None,
+        market_data_manager: Optional[MarketDataManager] = None
     ):
         """
         Initialize arbitrage strategy
@@ -100,8 +102,12 @@ class ArbitrageStrategy(BaseStrategy):
             order_manager: Order execution manager
             config: Optional configuration overrides
             atomic_executor: Optional AtomicDepthAwareExecutor for depth-aware execution
+            market_data_manager: WebSocket market data manager
         """
         super().__init__(client, order_manager, config)
+        
+        # Market data manager for real-time WebSocket data
+        self._market_data_manager = market_data_manager
         
         self.scanner = ArbScanner(client, order_manager)
         self.executor = AtomicExecutor(client, order_manager)
@@ -126,6 +132,44 @@ class ArbitrageStrategy(BaseStrategy):
             f"Scan interval: {ARB_SCAN_INTERVAL_SEC}s, "
             f"Execution cooldown: {ARB_EXECUTION_COOLDOWN_SEC}s"
         )
+        
+        # Register fill handler if WebSocket manager available
+        if self._market_data_manager:
+            self._market_data_manager.register_fill_handler(
+                'arbitrage',
+                self.handle_fill_event
+            )
+            logger.info("✅ Registered for real-time fill events via WebSocket")
+    
+    async def handle_fill_event(self, fill: FillEvent) -> None:
+        """
+        Handle real-time fill event from WebSocket
+        
+        Called by MarketDataManager when /user channel receives a fill.
+        Logs profit/loss and recycles capital immediately.
+        """
+        try:
+            logger.info(
+                f"[ARB Fill] {fill.side} {fill.size:.1f} @ {fill.price:.4f} "
+                f"(order: {fill.order_id[:8]}..., market: {fill.market_id[:8] if fill.market_id else 'unknown'}...)"
+            )
+            
+            # Log trade event for P&L tracking
+            log_trade_event(
+                event_type='ARBITRAGE_FILL',
+                market_id=fill.market_id or 'unknown',
+                action=fill.side,
+                token_id=fill.asset_id,
+                shares=fill.size,
+                price=fill.price,
+                reason=f"Arbitrage leg filled - order {fill.order_id[:8]}..."
+            )
+            
+            # TODO: Track capital recycling - when all legs fill, capital is freed
+            # This could trigger immediate re-scanning for new opportunities
+            
+        except Exception as e:
+            logger.error(f"Error handling arbitrage fill event: {e}", exc_info=True)
 
     async def run(self) -> None:
         """
@@ -458,8 +502,22 @@ class ArbitrageStrategy(BaseStrategy):
         for token_id, order_id, outcome_idx in filled_legs:
             async def liquidate_leg(tid, oid, idx):
                 try:
-                    # Get current order book for market sell
-                    book = await self.client.get_order_book(tid)
+                    # Get current order book from cache or REST
+                    book = None
+                    if self._market_data_manager:
+                        book_data = self._market_data_manager.get_order_book(tid)
+                        if book_data:
+                            # Convert cache format to expected format
+                            class OrderBookStub:
+                                def __init__(self, bids, asks):
+                                    self.bids = bids
+                                    self.asks = asks
+                            book = OrderBookStub(book_data.get('bids', []), book_data.get('asks', []))
+                    
+                    if not book:
+                        # Fallback to REST
+                        book = await self.client.get_order_book(tid)
+                    
                     bids = getattr(book, 'bids', [])
                     
                     if not bids:

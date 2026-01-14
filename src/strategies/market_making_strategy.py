@@ -47,6 +47,7 @@ import json
 from strategies.base_strategy import BaseStrategy
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
+from core.market_data_manager import MarketDataManager, FillEvent, MarketSnapshot
 from config.constants import (
     # Budget allocation
     MARKET_MAKING_STRATEGY_CAPITAL,
@@ -284,10 +285,14 @@ class MarketMakingStrategy(BaseStrategy):
         self,
         client: PolymarketClient,
         order_manager: OrderManager,
+        market_data_manager: Optional[MarketDataManager] = None,
         config: Optional[Dict[str, Any]] = None
     ):
         """Initialize market making strategy"""
         super().__init__(client, order_manager, config)
+        
+        # Market data manager for real-time WebSocket data
+        self._market_data_manager = market_data_manager
         
         # Budget tracking
         self._allocated_capital = Decimal(str(MARKET_MAKING_STRATEGY_CAPITAL))
@@ -339,6 +344,66 @@ class MarketMakingStrategy(BaseStrategy):
             f"Target spread: {MM_TARGET_SPREAD*100:.1f}%, "
             f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}"
         )
+        
+        # Register fill handler if WebSocket manager available
+        if self._market_data_manager:
+            self._market_data_manager.register_fill_handler(
+                'market_making',
+                self.handle_fill_event
+            )
+            logger.info("✅ Registered for real-time fill events via WebSocket")
+    
+    async def handle_fill_event(self, fill: FillEvent) -> None:
+        """
+        Handle real-time fill event from WebSocket
+        
+        Called by MarketDataManager when /user channel receives a fill.
+        This provides instant inventory updates without polling.
+        """
+        try:
+            # Find which position this fill belongs to
+            for market_id, position in self._positions.items():
+                if fill.order_id in position.active_bids.values() or fill.order_id in position.active_asks.values():
+                    # This fill belongs to this market
+                    is_buy = (fill.side.upper() == 'BUY')
+                    
+                    # Update inventory immediately
+                    position.update_inventory(
+                        token_id=fill.asset_id,
+                        shares=int(fill.size),
+                        price=fill.price,
+                        is_buy=is_buy
+                    )
+                    
+                    # Get current micro-price for markout tracking
+                    snapshot = self._market_data_manager.cache.get(fill.asset_id) if self._market_data_manager else None
+                    micro_price = snapshot.micro_price if snapshot else fill.price
+                    
+                    position.record_fill_for_markout(
+                        token_id=fill.asset_id,
+                        side=fill.side,
+                        fill_price=fill.price,
+                        micro_price=micro_price,
+                        size=fill.size
+                    )
+                    
+                    logger.info(
+                        f"[MM Fill] {fill.side} {fill.size:.1f} @ {fill.price:.4f} - "
+                        f"New inventory: {position.inventory[fill.asset_id]} "
+                        f"(micro: {micro_price:.4f})"
+                    )
+                    
+                    # Remove filled order from tracking
+                    if fill.order_id in position.active_bids.values():
+                        position.active_bids = {k: v for k, v in position.active_bids.items() if v != fill.order_id}
+                    if fill.order_id in position.active_asks.values():
+                        position.active_asks = {k: v for k, v in position.active_asks.items() if v != fill.order_id}
+                    
+                    self._total_fills += 1
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error handling fill event: {e}", exc_info=True)
     
     @property
     def is_running(self) -> bool:
@@ -665,6 +730,15 @@ class MarketMakingStrategy(BaseStrategy):
         )
         
         self._positions[market_id] = MarketPosition(market_id, question, token_ids)
+        
+        # Subscribe to WebSocket updates for this market
+        if self._market_data_manager:
+            try:
+                await self._market_data_manager.subscribe_markets([market_id])
+                logger.info(f"✅ Subscribed to WebSocket updates for {market_id[:8]}...")
+            except Exception as e:
+                logger.warning(f"Failed to subscribe to WebSocket for {market_id[:8]}...: {e}")
+        
         await self._place_quotes(market_id)
     
     async def _sync_fills(self) -> None:
@@ -989,33 +1063,45 @@ class MarketMakingStrategy(BaseStrategy):
         return target_bid, target_ask
     
     async def _get_market_prices(self, market_id: str, token_ids: List[str]) -> Dict[str, float]:
-        """Get current micro-prices (volume-weighted) with gapped market protection"""
+        """Get current micro-prices from WebSocket cache (zero-latency synchronous reads)"""
         prices = {}
+        
+        # Use WebSocket cache if available, fallback to REST
+        use_cache = self._market_data_manager is not None
         
         for token_id in token_ids:
             try:
-                order_book = await self.client.get_order_book(token_id)
-                bids = getattr(order_book, 'bids', [])
-                asks = getattr(order_book, 'asks', [])
-                
-                if bids and asks:
-                    best_bid = float(bids[0]['price'])
-                    best_ask = float(asks[0]['price'])
-                    
-                    # CRITICAL: Gapped market check (e.g., news event causes spread to blow out)
-                    # If spread > MM_MAX_SPREAD, market is disconnected - do NOT quote
-                    spread = best_ask - best_bid
-                    if spread > MM_MAX_SPREAD:
+                if use_cache:
+                    # CRITICAL: Check for stale data first (HFT-grade protection)
+                    if self._market_data_manager.is_market_stale(token_id):
                         logger.warning(
-                            f"⚠️ Gapped market detected: {token_id[:8]}... "
-                            f"(bid: {best_bid:.4f}, ask: {best_ask:.4f}, spread: {spread:.4f}) - "
-                            f"SKIPPING (too risky to provide liquidity)"
+                            f"⚠️ STALE DATA: {token_id[:8]}... - "
+                            f"No WebSocket update in 2+ seconds - SKIPPING QUOTES"
                         )
-                        continue  # Skip this token - don't add to prices dict
+                        continue  # Pause activity for stale markets
                     
-                    micro_price = self._calculate_micro_price(bids, asks)
-                    if micro_price:
-                        # CRITICAL: Oracle price sanity check (protects against flash crashes)
+                    # Synchronous cache read (O(1) lookup, no network latency)
+                    snapshot = self._market_data_manager.cache.get(token_id)
+                    if not snapshot:
+                        logger.debug(f"No cache data for {token_id[:8]}... - using REST fallback")
+                        # Fallback to REST
+                        use_cache = False
+                    else:
+                        best_bid = snapshot.best_bid
+                        best_ask = snapshot.best_ask
+                        micro_price = snapshot.micro_price
+                        
+                        # CRITICAL: Gapped market check
+                        spread = best_ask - best_bid
+                        if spread > MM_MAX_SPREAD:
+                            logger.warning(
+                                f"⚠️ Gapped market detected: {token_id[:8]}... "
+                                f"(bid: {best_bid:.4f}, ask: {best_ask:.4f}, spread: {spread:.4f}) - "
+                                f"SKIPPING (too risky to provide liquidity)"
+                            )
+                            continue
+                        
+                        # CRITICAL: Oracle price sanity check
                         if self._oracle_enabled and market_id in self._oracle_prices:
                             oracle_price = self._oracle_prices[market_id]
                             price_deviation = abs(micro_price - oracle_price) / oracle_price
@@ -1026,9 +1112,32 @@ class MarketMakingStrategy(BaseStrategy):
                                     f"Polymarket: {micro_price:.4f}, Oracle: {oracle_price:.4f}, "
                                     f"Deviation: {price_deviation*100:.1f}% - SKIPPING (potential flash crash)"
                                 )
-                                continue  # Don't quote on anomalous prices
+                                continue
                         
                         prices[token_id] = micro_price
+                        continue  # Successfully got price from cache
+                
+                # REST Fallback (only if cache unavailable)
+                if not use_cache:
+                    order_book = await self.client.get_order_book(token_id)
+                    bids = getattr(order_book, 'bids', [])
+                    asks = getattr(order_book, 'asks', [])
+                    
+                    if bids and asks:
+                        best_bid = float(bids[0]['price'])
+                        best_ask = float(asks[0]['price'])
+                        
+                        spread = best_ask - best_bid
+                        if spread > MM_MAX_SPREAD:
+                            logger.warning(
+                                f"⚠️ Gapped market detected (REST): {token_id[:8]}... "
+                                f"(spread: {spread:.4f}) - SKIPPING"
+                            )
+                            continue
+                        
+                        micro_price = self._calculate_micro_price(bids, asks)
+                        if micro_price:
+                            prices[token_id] = micro_price
                     
             except Exception as e:
                 logger.debug(f"Error fetching price for {token_id[:8]}...: {e}")
