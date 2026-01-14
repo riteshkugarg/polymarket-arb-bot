@@ -798,8 +798,26 @@ class MarketMakingStrategy(BaseStrategy):
             
             logger.debug(f"Total markets fetched: {len(all_markets)}")
             
-            # Filter for eligible markets
-            eligible = [m for m in all_markets if self._is_market_eligible(m)]
+            # DEBUG: Track rejection reasons
+            rejection_stats = {
+                'not_binary': 0,
+                'low_volume': 0,
+                'inactive': 0,
+                'low_liquidity': 0,
+                'negrisk': 0,
+                'not_accepting_orders': 0,
+                'passed': 0
+            }
+            
+            # Filter for eligible markets with detailed tracking
+            eligible = []
+            for m in all_markets:
+                is_eligible, reason = self._is_market_eligible_debug(m)
+                if is_eligible:
+                    eligible.append(m)
+                    rejection_stats['passed'] += 1
+                else:
+                    rejection_stats[reason] = rejection_stats.get(reason, 0) + 1
             
             # Sort by volume and take top candidates (3x capacity for rotation)
             self._eligible_markets = sorted(
@@ -809,14 +827,52 @@ class MarketMakingStrategy(BaseStrategy):
             )[:MM_MAX_ACTIVE_MARKETS * 3]
             
             logger.info(
-                f"Found {len(self._eligible_markets)} eligible markets for market making "
-                f"(min volume: ${MM_MIN_MARKET_VOLUME_24H}, scanned: {len(all_markets)})"
+                f"📊 MARKET MAKING ELIGIBILITY (scanned {len(all_markets)} markets):\n"
+                f"   ❌ Not binary: {rejection_stats['not_binary']}\n"
+                f"   ❌ Low volume (<$100): {rejection_stats['low_volume']}\n"
+                f"   ❌ Inactive/closed: {rejection_stats['inactive']}\n"
+                f"   ❌ Low liquidity (<$100): {rejection_stats['low_liquidity']}\n"
+                f"   ❌ NegRisk: {rejection_stats['negrisk']}\n"
+                f"   ❌ Not accepting orders: {rejection_stats['not_accepting_orders']}\n"
+                f"   ✅ PASSED: {rejection_stats['passed']}"
             )
             
             self._last_market_scan = current_time
             
         except Exception as e:
             logger.error(f"Error scanning markets: {e}", exc_info=True)
+    
+    def _is_market_eligible_debug(self, market: Dict[str, Any]) -> Tuple[bool, str]:
+        """Debug version that returns (is_eligible, rejection_reason)"""
+        # Binary market check
+        tokens = market.get('tokens', [])
+        if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
+            return (False, 'not_binary')
+        
+        # Volume threshold
+        volume_24h = market.get('volume24hr', 0)
+        if volume_24h < MM_MIN_MARKET_VOLUME_24H:
+            return (False, 'low_volume')
+        
+        # Active market check
+        if market.get('closed', False) or not market.get('active', True):
+            return (False, 'inactive')
+        
+        # Liquidity check
+        liquidity = market.get('liquidity', 0)
+        if liquidity < 100.0:
+            return (False, 'low_liquidity')
+        
+        # NegRisk awareness
+        is_negrisk = market.get('negRisk', False)
+        if is_negrisk:
+            return (False, 'negrisk')
+        
+        # Accepting orders check
+        if not market.get('acceptingOrders', True):
+            return (False, 'not_accepting_orders')
+        
+        return (True, 'passed')
     
     def _is_market_eligible(self, market: Dict[str, Any]) -> bool:
         """Check if market meets criteria for market making (INSTITUTION-GRADE)

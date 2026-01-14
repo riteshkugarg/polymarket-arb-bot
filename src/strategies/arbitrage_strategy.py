@@ -399,6 +399,21 @@ class ArbitrageStrategy(BaseStrategy):
             
             logger.debug(f"Fetched {len(all_events)} total events from Gamma API")
             
+            # DEBUG: Analyze outcome count distribution
+            outcome_distribution = {}
+            for event in all_events:
+                outcomes = event.get('outcomes', [])
+                count = len(outcomes)
+                outcome_distribution[count] = outcome_distribution.get(count, 0) + 1
+            
+            logger.info(
+                f"📊 OUTCOME DISTRIBUTION ({len(all_events)} events):\n"
+                f"   2 outcomes (binary): {outcome_distribution.get(2, 0)}\n"
+                f"   3 outcomes: {outcome_distribution.get(3, 0)}\n"
+                f"   4+ outcomes: {sum(v for k, v in outcome_distribution.items() if k >= 4)}\n"
+                f"   Full breakdown: {dict(sorted(outcome_distribution.items()))}"
+            )
+            
             # Sample first event to understand structure (debugging)
             if all_events:
                 sample = all_events[0]
@@ -413,11 +428,14 @@ class ArbitrageStrategy(BaseStrategy):
             
             # Filter for multi-outcome events (3+ outcomes)
             multi_outcome_events = []
+            rejection_stats = {'binary': 0, 'negrisk_placeholders': 0}
+            
             for event in all_events:
                 outcomes = event.get('outcomes', [])
                 
                 # Skip binary events (only 2 outcomes)
                 if len(outcomes) < 3:
+                    rejection_stats['binary'] += 1
                     continue
                 
                 # Skip NegRisk augmented events with unnamed placeholders
@@ -426,6 +444,7 @@ class ArbitrageStrategy(BaseStrategy):
                     # Check if any outcomes are unnamed/placeholders
                     named_outcomes = [o for o in outcomes if o and len(o) > 0]
                     if len(named_outcomes) < len(outcomes):
+                        rejection_stats['negrisk_placeholders'] += 1
                         logger.debug(
                             f"Skipping NegRisk event {event.get('id')} with unnamed placeholders"
                         )
@@ -437,6 +456,14 @@ class ArbitrageStrategy(BaseStrategy):
                 token_ids = event.get('clobTokenIds', [])
                 for token_id in token_ids:
                     self._arb_eligible_markets.add(token_id)
+            
+            logger.info(
+                f"🔍 FILTERING ANALYSIS:\n"
+                f"   ❌ Rejected (binary <3 outcomes): {rejection_stats['binary']}\n"
+                f"   ❌ Rejected (NegRisk placeholders): {rejection_stats['negrisk_placeholders']}\n"
+                f"   ✅ PASSED FILTER: {len(multi_outcome_events)} events\n"
+                f"   ✅ Total assets: {len(self._arb_eligible_markets)}"
+            )
             
             logger.info(
                 f"Discovered {len(self._arb_eligible_markets)} arb-eligible assets "
