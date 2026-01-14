@@ -561,6 +561,12 @@ MM_INVENTORY_SPREAD_MULTIPLIER: Final[float] = 1.5
 # Maximum loss per position before force-exit (USD)
 MM_MAX_LOSS_PER_POSITION: Final[float] = 3.0
 
+# Global daily loss limit - circuit breaker (USD)
+MM_GLOBAL_DAILY_LOSS_LIMIT: Final[float] = 50.0
+
+# External oracle price deviation threshold (percentage)
+MM_ORACLE_PRICE_DEVIATION_LIMIT: Final[float] = 0.15  # 15% max deviation
+
 # Maximum time to hold inventory before force-liquidation (seconds)
 MM_MAX_INVENTORY_HOLD_TIME: Final[int] = 3600  # 1 hour
 
