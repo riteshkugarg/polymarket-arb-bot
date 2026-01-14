@@ -3180,8 +3180,12 @@ class PolymarketBot:
             
             # Check strategy status
             for strategy in self.strategies:
-                if not strategy.is_running:
-                    logger.warning(f"Strategy {strategy.name} is not running")
+                # Safely check if strategy has is_running attribute
+                is_running = getattr(strategy, 'is_running', True)  # Default to True if not present
+                strategy_name = getattr(strategy, 'name', strategy.__class__.__name__)
+                
+                if not is_running:
+                    logger.warning(f"Strategy {strategy_name} is not running")
             
             # Reset consecutive errors on successful check
             self.consecutive_errors = 0
