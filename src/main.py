@@ -294,14 +294,16 @@ class PolymarketBot:
                 )
                 self.market_data_manager = None
             
-            # Initialize arbitrage scanner with WebSocket support
-            arb_strategy = ArbScanner(
+            # Initialize arbitrage strategy with event-driven WebSocket support
+            from strategies.arbitrage_strategy import ArbitrageStrategy
+            arb_strategy = ArbitrageStrategy(
                 self.client,
                 self.order_manager,
-                market_data_manager=self.market_data_manager  # Pass WebSocket manager
+                market_data_manager=self.market_data_manager,  # Event-driven WebSocket
+                atomic_executor=self.atomic_executor  # Depth-aware execution
             )
             self.strategies.append(arb_strategy)
-            logger.info("✅ Arbitrage Scanner initialized (WebSocket + REST hybrid mode)")
+            logger.info("✅ ArbitrageStrategy initialized (EVENT-DRIVEN WebSocket mode)")
             
             # Initialize market making strategy (runs in parallel with arbitrage)
             market_making_strategy = MarketMakingStrategy(
@@ -311,6 +313,10 @@ class PolymarketBot:
             )
             self.strategies.append(market_making_strategy)
             logger.info("✅ Market Making Strategy initialized (WebSocket + REST hybrid mode)")
+            
+            # Enable cross-strategy coordination
+            arb_strategy.set_market_making_strategy(market_making_strategy)
+            logger.info("✅ Cross-strategy coordination enabled")
             
             # UPGRADE 2: Initialize Web3 for NegRisk adapter interactions
             try:
@@ -458,9 +464,14 @@ class PolymarketBot:
             logger.info("[WEBSOCKET] Subscribing to active markets...")
             
             # Get top 50 active markets
-            markets = await self.client.get_markets()
-            if not markets:
+            markets_response = await self.client.get_markets()
+            if not markets_response or 'data' not in markets_response:
                 logger.warning("[WEBSOCKET] No markets found for subscription")
+                return
+            
+            markets = markets_response['data']
+            if not markets:
+                logger.warning("[WEBSOCKET] Empty markets list")
                 return
             
             # Filter for liquid markets
@@ -2541,40 +2552,26 @@ class PolymarketBot:
 
     async def _arbitrage_scan_loop(self) -> None:
         """
-        Main arbitrage scanning loop
+        EVENT-DRIVEN Arbitrage Strategy Loop
         
         2026 EVENT-DRIVEN ARCHITECTURE:
-        - Reads from MarketStateCache (WebSocket-fed, sub-50ms latency)
-        - Falls back to REST only if cache is stale
-        - No longer polls every market blindly (rate limit safe)
-        
-        Continuously scans markets for arbitrage opportunities and executes them.
-        Uses ArbScanner to detect opportunities where sum(prices) < 0.98.
+        - Runs ArbitrageStrategy.run() which subscribes to WebSocket price updates
+        - NO MORE POLLING - triggers only on price changes
+        - Sub-100ms latency vs 1s polling
         """
-        logger.info("[SCAN] Arbitrage scanner started (WebSocket-driven mode)")
+        logger.info("[SCAN] Arbitrage strategy started (EVENT-DRIVEN mode)")
         
-        # Get the ArbScanner instance
-        arb_scanner = self.strategies[0] if self.strategies else None
-        if not arb_scanner:
-            logger.error("[SCAN] No ArbScanner found - cannot start scanning")
+        # Get the ArbitrageStrategy instance
+        arb_strategy = self.strategies[0] if self.strategies else None
+        if not arb_strategy:
+            logger.error("[SCAN] No ArbitrageStrategy found - cannot start")
             return
         
-        while self.is_running:
-            try:
-                # Scan for arbitrage opportunities (now reads from cache)
-                opportunities = await arb_scanner.scan_markets()
-                
-                if opportunities:
-                    logger.info(f"[SCAN] Found {len(opportunities)} arbitrage opportunities")
-                    # Opportunities are executed atomically by AtomicDepthAwareExecutor
-                    # which is injected into the scanner's order manager
-                
-                # Wait before next scan (reduced from 3s to 1s due to cache speed)
-                await asyncio.sleep(LOOP_INTERVAL_SEC)
-                
-            except Exception as e:
-                logger.error(f"[SCAN] Error in arbitrage scan loop: {e}", exc_info=True)
-                await asyncio.sleep(5)  # Brief pause on error
+        try:
+            # Run event-driven strategy (subscribes to WebSocket updates)
+            await arb_strategy.run()
+        except Exception as e:
+            logger.error(f"[SCAN] Error in arbitrage strategy: {e}", exc_info=True)
     
     async def _market_making_loop(self) -> None:
         """
