@@ -142,6 +142,9 @@ class MarketStateCache:
         # User fills cache (for instant inventory updates)
         self._user_fills: Dict[str, List[FillEvent]] = {}  # asset_id -> list of fills
         
+        # Disconnection callback handlers (INSTITUTIONAL SAFETY: Flash Cancel)
+        self._disconnection_handlers: Dict[str, Callable[[], None]] = {}
+        
         logger.info(
             f"MarketStateCache initialized (stale threshold: {stale_threshold_seconds}s) "
             f"[HFT-Grade Timestamp Integrity ENABLED]"
@@ -263,6 +266,28 @@ class MarketStateCache:
                 fill for fill in self._user_fills[asset_id]
                 if (current_time - fill.timestamp) <= max_age_seconds
             ]
+    
+    def register_disconnection_handler(self, name: str, handler: Callable[[], None]) -> None:
+        """Register callback to be invoked on WebSocket disconnection
+        
+        INSTITUTIONAL SAFETY: Flash Cancel on Disconnect
+        - Strategies register handlers to cancel all orders immediately
+        - Prevents "blind quoting" when data feed is down
+        """
+        with self._lock:
+            self._disconnection_handlers[name] = handler
+            logger.info(f"Registered disconnection handler: {name}")
+    
+    def trigger_disconnection_callbacks(self) -> None:
+        """Invoke all disconnection handlers (called when WebSocket drops)"""
+        with self._lock:
+            logger.critical("🚨 TRIGGERING DISCONNECTION CALLBACKS - Flash cancelling all orders")
+            for name, handler in self._disconnection_handlers.items():
+                try:
+                    handler()
+                    logger.info(f"✅ Disconnection handler executed: {name}")
+                except Exception as e:
+                    logger.error(f"❌ Disconnection handler failed ({name}): {e}", exc_info=True)
 
 
 # Backwards compatibility alias
@@ -398,7 +423,13 @@ class PolymarketWSManager:
         INSTITUTIONAL SAFETY: Exponential backoff with state rehydration
         - Delay = min(2^attempts, 60s)
         - After successful reconnect, trigger REST sync before resuming trading
+        
+        CRITICAL SAFETY:
+        - Trigger disconnection callbacks IMMEDIATELY to cancel all orders
         """
+        # CRITICAL: Trigger disconnection callbacks to cancel all orders
+        self.cache.trigger_disconnection_callbacks()
+        
         self._reconnect_attempts += 1
         delay = min(2 ** self._reconnect_attempts, self._max_reconnect_delay)
         
@@ -464,6 +495,10 @@ class PolymarketWSManager:
             except ConnectionClosed:
                 logger.warning("WebSocket connection closed")
                 self._is_connected = False
+                
+                # CRITICAL: Trigger disconnection callbacks immediately
+                self.cache.trigger_disconnection_callbacks()
+                
                 await self._handle_reconnect()
                 
             except Exception as e:

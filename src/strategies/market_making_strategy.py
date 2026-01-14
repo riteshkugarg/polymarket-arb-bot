@@ -352,6 +352,20 @@ class MarketMakingStrategy(BaseStrategy):
                 self.handle_fill_event
             )
             logger.info("✅ Registered for real-time fill events via WebSocket")
+            
+            # INSTITUTIONAL SAFETY: Register disconnection handler for Flash Cancel
+            self._market_data_manager.cache.register_disconnection_handler(
+                'market_making_flash_cancel',
+                self.on_websocket_disconnection
+            )
+            logger.info("✅ Registered disconnection handler for Flash Cancel")
+            
+            # INSTITUTIONAL SAFETY: Register disconnection handler for Flash Cancel
+            self._market_data_manager.cache.register_disconnection_handler(
+                'market_making_flash_cancel',
+                self.on_websocket_disconnection
+            )
+            logger.info("✅ Registered disconnection handler for Flash Cancel")
     
     async def handle_fill_event(self, fill: FillEvent) -> None:
         """
@@ -448,6 +462,69 @@ class MarketMakingStrategy(BaseStrategy):
     def is_running(self, value: bool) -> None:
         """Allow BaseStrategy to set running state"""
         self._is_running = value
+    
+    def on_websocket_disconnection(self) -> None:
+        """
+        INSTITUTIONAL SAFETY: Flash Cancel on WebSocket Disconnect
+        
+        Called immediately when WebSocket connection drops.
+        This prevents "blind quoting" - leaving orders on the exchange
+        while having no live data feed.
+        
+        CRITICAL: This is a synchronous callback - must not use await.
+        We schedule the async cancel operation in the event loop.
+        """
+        logger.critical(
+            "🚨 FLASH CANCEL TRIGGERED: WebSocket disconnected - "
+            "Cancelling ALL quotes to prevent blind trading"
+        )
+        
+        # Schedule async cancel in event loop (callback must be sync)
+        try:
+            # Get the running event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Schedule the async cancel as a task
+                loop.create_task(self._emergency_cancel_all_orders())
+            else:
+                logger.error("Event loop not running - cannot schedule flash cancel")
+        except Exception as e:
+            logger.error(f"Failed to schedule flash cancel: {e}", exc_info=True)
+    
+    async def _emergency_cancel_all_orders(self) -> None:
+        """
+        Emergency cancellation of ALL active orders across all positions
+        
+        Used by Flash Cancel on disconnection to prevent blind trading.
+        """
+        try:
+            cancel_count = 0
+            for market_id, position in self._positions.items():
+                # Cancel all bids
+                for token_id, order_id in list(position.active_bids.items()):
+                    try:
+                        await self.client.cancel_order(order_id)
+                        cancel_count += 1
+                        del position.active_bids[token_id]
+                    except Exception as e:
+                        logger.debug(f"Failed to cancel bid {order_id[:8]}...: {e}")
+                
+                # Cancel all asks
+                for token_id, order_id in list(position.active_asks.items()):
+                    try:
+                        await self.client.cancel_order(order_id)
+                        cancel_count += 1
+                        del position.active_asks[token_id]
+                    except Exception as e:
+                        logger.debug(f"Failed to cancel ask {order_id[:8]}...: {e}")
+            
+            logger.critical(
+                f"✅ FLASH CANCEL COMPLETE: Cancelled {cancel_count} orders "
+                f"across {len(self._positions)} positions"
+            )
+            
+        except Exception as e:
+            logger.error(f"Emergency cancel failed: {e}", exc_info=True)
     
     async def run(self) -> None:
         """Main strategy loop"""
