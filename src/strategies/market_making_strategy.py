@@ -456,6 +456,29 @@ class MarketMakingStrategy(BaseStrategy):
         """Allow BaseStrategy to set running state"""
         self._is_running = value
     
+    def get_market_inventory(self, market_id: str) -> Optional[Dict[str, int]]:
+        """Get current inventory for a specific market (CROSS-STRATEGY COORDINATION)
+        
+        Returns:
+            Dict mapping token_id -> inventory (positive = long, negative = short)
+            None if no position in this market
+        """
+        position = self._positions.get(market_id)
+        if not position:
+            return None
+        return position.inventory.copy()
+    
+    def get_all_inventory(self) -> Dict[str, Dict[str, int]]:
+        """Get inventory across all active positions
+        
+        Returns:
+            Dict mapping market_id -> {token_id -> inventory}
+        """
+        return {
+            market_id: position.inventory.copy()
+            for market_id, position in self._positions.items()
+        }
+    
     def on_websocket_disconnection(self) -> None:
         """
         INSTITUTIONAL SAFETY: Flash Cancel on WebSocket Disconnect

@@ -145,6 +145,12 @@ class MarketStateCache:
         # Disconnection callback handlers (INSTITUTIONAL SAFETY: Flash Cancel)
         self._disconnection_handlers: Dict[str, Callable[[], None]] = {}
         
+        # Market update handlers (EVENT-DRIVEN ARCHITECTURE)
+        # Format: {handler_name: (handler_func, market_filter)}
+        # handler_func signature: async def handler(asset_id: str, snapshot: MarketSnapshot) -> None
+        # market_filter: Optional set of asset_ids to watch (None = all markets)
+        self._market_update_handlers: Dict[str, Tuple[Callable, Optional[Set[str]]]] = {}
+        
         logger.info(
             f"MarketStateCache initialized (stale threshold: {stale_threshold_seconds}s) "
             f"[HFT-Grade Timestamp Integrity ENABLED]"
@@ -288,6 +294,39 @@ class MarketStateCache:
                     logger.info(f"✅ Disconnection handler executed: {name}")
                 except Exception as e:
                     logger.error(f"❌ Disconnection handler failed ({name}): {e}", exc_info=True)
+    
+    def register_market_update_handler(
+        self,
+        name: str,
+        handler: Callable,
+        market_filter: Optional[Set[str]] = None
+    ) -> None:
+        """Register callback for market price updates (EVENT-DRIVEN ARCHITECTURE)
+        
+        Args:
+            name: Unique handler name (e.g., 'arbitrage_scanner')
+            handler: Async function to call on price updates
+                     Signature: async def handler(asset_id: str, snapshot: MarketSnapshot) -> None
+            market_filter: Optional set of asset_ids to watch (None = all markets)
+        """
+        with self._lock:
+            self._market_update_handlers[name] = (handler, market_filter)
+            logger.info(
+                f"Registered market update handler: {name} "
+                f"(filter: {len(market_filter) if market_filter else 'all'} markets)"
+            )
+    
+    def unregister_market_update_handler(self, name: str) -> None:
+        """Unregister market update handler"""
+        with self._lock:
+            if name in self._market_update_handlers:
+                del self._market_update_handlers[name]
+                logger.info(f"Unregistered market update handler: {name}")
+    
+    def get_market_update_handlers(self) -> List[Tuple[str, Callable, Optional[Set[str]]]]:
+        """Get all registered market update handlers (for triggering)"""
+        with self._lock:
+            return [(name, handler, filter_set) for name, (handler, filter_set) in self._market_update_handlers.items()]
 
 
 # Backwards compatibility alias
@@ -553,12 +592,35 @@ class PolymarketWSManager:
                 )
                 
                 # Update cache
-                self.cache.update(asset_id, snapshot)
+                updated = self.cache.update(asset_id, snapshot)
+                
+                # Trigger market update handlers (EVENT-DRIVEN)
+                if updated:
+                    await self._trigger_market_update_handlers(asset_id, snapshot)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Orderbook processor error: {e}", exc_info=True)
+    
+    async def _trigger_market_update_handlers(self, asset_id: str, snapshot: MarketSnapshot) -> None:
+        """Trigger all registered market update handlers for an asset"""
+        handlers = self.cache.get_market_update_handlers()
+        
+        for name, handler, market_filter in handlers:
+            try:
+                # Check if this handler wants updates for this market
+                if market_filter is not None and asset_id not in market_filter:
+                    continue
+                
+                # Call handler asynchronously
+                if asyncio.iscoroutinefunction(handler):
+                    await handler(asset_id, snapshot)
+                else:
+                    handler(asset_id, snapshot)
+                    
+            except Exception as e:
+                logger.error(f"Market update handler error ({name}): {e}", exc_info=True)
     
     async def _fill_processor(self) -> None:
         """Process fill events and dispatch to strategies"""

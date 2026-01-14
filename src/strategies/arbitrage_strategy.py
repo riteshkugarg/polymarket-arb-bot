@@ -122,6 +122,12 @@ class ArbitrageStrategy(BaseStrategy):
         self._last_execution_time = 0
         self._executed_opportunities: Dict[str, float] = {}  # market_id -> timestamp
         
+        # Event-driven architecture state
+        self._arb_eligible_markets: Set[str] = set()  # Asset IDs that are arb-eligible
+        self._pending_scan = False  # Debounce flag to prevent duplicate scans
+        self._scan_lock = asyncio.Lock()
+        self._market_making_strategy: Optional[Any] = None  # Reference for cross-strategy coordination
+        
         # Metrics
         self._total_arb_executions = 0
         self._successful_executions = 0
@@ -174,48 +180,65 @@ class ArbitrageStrategy(BaseStrategy):
 
     async def run(self) -> None:
         """
-        Main strategy loop - continuously scan and execute arbitrage
+        EVENT-DRIVEN Strategy - Subscribe to price updates instead of polling
         
-        Runs independently alongside mirror strategy
+        New Architecture:
+        1. Discover all multi-outcome markets (3+ outcomes)
+        2. Subscribe to WebSocket price updates for those markets
+        3. Trigger arb scan ONLY when prices change in arb-eligible markets
+        4. Execute opportunities with cross-strategy coordination
         """
         if self._is_running:
             logger.warning("ArbitrageStrategy already running")
             return
         
         self._is_running = True
-        logger.info("🚀 ArbitrageStrategy started")
+        logger.info("🚀 ArbitrageStrategy started (EVENT-DRIVEN MODE)")
         
         try:
+            # Initialize: Discover arb-eligible markets
+            await self._discover_arb_eligible_markets()
+            
+            # Register for price update events
+            if self._market_data_manager:
+                self._market_data_manager.cache.register_market_update_handler(
+                    'arbitrage_scanner',
+                    self._on_market_update,
+                    market_filter=self._arb_eligible_markets
+                )
+                logger.info(
+                    f"✅ Subscribed to {len(self._arb_eligible_markets)} arb-eligible markets "
+                    f"(EVENT-DRIVEN - no more polling!)"
+                )
+            else:
+                # Fallback to polling if no WebSocket manager
+                logger.warning("No MarketDataManager - falling back to polling mode")
+                while self._is_running:
+                    try:
+                        await self._arb_scan_loop()
+                        await asyncio.sleep(ARB_SCAN_INTERVAL_SEC)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as e:
+                        logger.error(f"Polling mode error: {e}")
+                        await asyncio.sleep(5)
+                return
+            
+            # Keep strategy alive (event handlers run in background)
             while self._is_running:
-                try:
-                    await self._arb_scan_loop()
-                    await asyncio.sleep(ARB_SCAN_INTERVAL_SEC)
+                await asyncio.sleep(1)
+                
+                # Periodic health check
+                if self._circuit_breaker_active:
+                    logger.warning("Circuit breaker active - strategy paused")
+                    await asyncio.sleep(30)
                     
-                except asyncio.CancelledError:
-                    logger.info("ArbitrageStrategy cancelled")
-                    break
-                except Exception as e:
-                    logger.error(f"Unexpected error in arb loop: {e}")
-                    
-                    # FIX 3: Only system errors trigger circuit breaker, not market errors
-                    if self._is_system_error(e):
-                        self._consecutive_failures += 1
-                        logger.warning(
-                            f"System error detected (count: {self._consecutive_failures}/{ARB_MAX_CONSECUTIVE_FAILURES}): {e}"
-                        )
-                        
-                        # Check circuit breaker
-                        if self._consecutive_failures >= ARB_MAX_CONSECUTIVE_FAILURES:
-                            self._circuit_breaker_active = True
-                            logger.error(
-                                f"🚨 Circuit breaker activated after {self._consecutive_failures} system errors"
-                            )
-                            await asyncio.sleep(30)  # Back off for 30 seconds
-                    else:
-                        # Market error (FOK rejection, price moved, etc.) - don't count toward circuit breaker
-                        logger.debug(f"Market error (not counting toward circuit breaker): {e}")
-                        
+        except asyncio.CancelledError:
+            logger.info("ArbitrageStrategy cancelled")
         finally:
+            # Cleanup
+            if self._market_data_manager:
+                self._market_data_manager.cache.unregister_market_update_handler('arbitrage_scanner')
             self._is_running = False
             logger.info("🛑 ArbitrageStrategy stopped")
 
@@ -223,6 +246,67 @@ class ArbitrageStrategy(BaseStrategy):
         """Stop the strategy loop"""
         self._is_running = False
         logger.info("Stopping ArbitrageStrategy")
+    
+    def set_market_making_strategy(self, mm_strategy: Any) -> None:
+        """Set reference to MarketMakingStrategy for cross-strategy coordination"""
+        self._market_making_strategy = mm_strategy
+        logger.info("✅ Cross-strategy coordination enabled with MarketMakingStrategy")
+    
+    async def _discover_arb_eligible_markets(self) -> None:
+        """Discover all multi-outcome markets (3+ outcomes) for arb eligibility"""
+        try:
+            logger.info("Discovering arb-eligible markets...")
+            
+            # Fetch all active markets
+            response = await self.client.get_markets()
+            markets = response.get('data', [])
+            
+            # Filter for multi-outcome markets (3+ outcomes)
+            for market in markets:
+                tokens = market.get('tokens', [])
+                if len(tokens) >= 3:
+                    # Add all token IDs to subscription list
+                    token_ids = market.get('clobTokenIds', [])
+                    for token_id in token_ids:
+                        self._arb_eligible_markets.add(token_id)
+            
+            logger.info(
+                f"Discovered {len(self._arb_eligible_markets)} arb-eligible assets "
+                f"across multi-outcome markets"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to discover arb-eligible markets: {e}")
+    
+    async def _on_market_update(self, asset_id: str, snapshot: Any) -> None:
+        """Handle price update event (EVENT-DRIVEN callback)
+        
+        Called by MarketDataManager when price changes in arb-eligible market.
+        Triggers arb scan with debouncing to prevent excessive scanning.
+        """
+        try:
+            # Debounce: Skip if scan already pending
+            if self._pending_scan:
+                return
+            
+            async with self._scan_lock:
+                self._pending_scan = True
+                
+                # Small delay to batch multiple price updates
+                await asyncio.sleep(0.1)
+                
+                logger.debug(
+                    f"[EVENT] Price update in {asset_id[:8]}... - triggering arb scan"
+                )
+                
+                # Trigger scan
+                await self._arb_scan_loop()
+                
+                self._pending_scan = False
+                
+        except Exception as e:
+            logger.error(f"Market update handler error: {e}", exc_info=True)
+            self._pending_scan = False
 
     async def _arb_scan_loop(self) -> None:
         """
@@ -249,6 +333,10 @@ class ArbitrageStrategy(BaseStrategy):
             if not executable_opps:
                 logger.debug(f"No executable opportunities (found {len(opportunities)} total)")
                 return
+            
+            # CROSS-STRATEGY COORDINATION: Prioritize opportunities that reduce MM inventory
+            if self._market_making_strategy:
+                executable_opps = self._prioritize_by_mm_inventory(executable_opps)
             
             # Execute top opportunity
             top_opportunity = executable_opps[0]
@@ -573,6 +661,55 @@ class ArbitrageStrategy(BaseStrategy):
                 f"[{execution_id}] ⚠️  INCOMPLETE REVERSION: "
                 f"{len(filled_legs) - success_count} legs still orphaned - manual intervention required"
             )
+    
+    def _prioritize_by_mm_inventory(
+        self,
+        opportunities: List[ArbitrageOpportunity]
+    ) -> List[ArbitrageOpportunity]:
+        """Prioritize arb opportunities that reduce MM inventory risk
+        
+        Logic:
+        - Check MM strategy's current inventory for each market
+        - If MM is long YES and arb requires buying NO, prioritize higher
+        - If MM is short and arb requires buying YES, prioritize higher
+        - Score = base_roi + inventory_reduction_bonus
+        """
+        if not self._market_making_strategy:
+            return opportunities
+        
+        scored_opps = []
+        
+        for opp in opportunities:
+            base_roi = opp.net_profit_per_share / opp.required_budget if opp.required_budget > 0 else 0
+            
+            # Check if MM has inventory in this market
+            mm_inventory = self._market_making_strategy.get_market_inventory(opp.market_id)
+            
+            inventory_bonus = 0.0
+            if mm_inventory:
+                # Calculate if arb trade would reduce MM inventory
+                for outcome in opp.outcomes:
+                    token_inventory = mm_inventory.get(outcome.token_id, 0)
+                    
+                    # If MM is long this token, arb buying it doesn't help
+                    # If MM is short this token, arb buying it helps neutralize
+                    if token_inventory < 0:
+                        # MM is short - arb buying this token helps
+                        inventory_bonus += abs(token_inventory) * 0.01  # 1% bonus per share
+                
+                if inventory_bonus > 0:
+                    logger.info(
+                        f"[CROSS-STRATEGY] Arb on {opp.market_id[:8]}... helps reduce "
+                        f"MM inventory (bonus: +{inventory_bonus*100:.1f}%)"
+                    )
+            
+            # Combined score
+            total_score = base_roi + inventory_bonus
+            scored_opps.append((total_score, opp))
+        
+        # Re-sort by combined score
+        scored_opps.sort(key=lambda x: x[0], reverse=True)
+        return [opp for _, opp in scored_opps]
     
     def _is_system_error(self, error: Exception) -> bool:
         """

@@ -74,7 +74,17 @@ TAKER_FEE_PERCENT = 0.015  # 1.5% per trade
 ARBITRAGE_OPPORTUNITY_THRESHOLD = 0.98  # sum(prices) < 0.98
 TAKER_FEE_BUFFER = TAKER_FEE_PERCENT  # Account for fee in opportunity detection
 FINAL_THRESHOLD = ARBITRAGE_OPPORTUNITY_THRESHOLD  # sum < 0.98 after fee buffer
-MAX_SLIPPAGE_PER_LEG = 0.005  # $0.005 maximum slippage per outcome
+
+# SMART SLIPPAGE: Dynamic based on order book depth (replaces flat $0.005)
+# Thin books (< 20 shares) = tight slippage to avoid impact
+# Medium books (20-100 shares) = moderate slippage
+# Deep books (> 100 shares) = looser slippage
+SLIPPAGE_TIGHT = 0.002  # $0.002 for thin books
+SLIPPAGE_MODERATE = 0.005  # $0.005 for medium books (legacy default)
+SLIPPAGE_LOOSE = 0.010  # $0.010 for deep books
+DEPTH_THRESHOLD_THIN = 20  # shares
+DEPTH_THRESHOLD_MEDIUM = 100  # shares
+
 MIN_ORDER_BOOK_DEPTH = 10  # Require depth for at least 10 shares
 MAX_ARBITRAGE_BUDGET_PER_BASKET = 10.0  # Max $10 per arbitrage basket
 MIN_ARBITRAGE_BUDGET_PER_BASKET = 5.0  # Min $5 per arbitrage basket
@@ -176,8 +186,33 @@ class ArbScanner:
         logger.info(
             "ArbScanner initialized - Looking for sum(prices) < 0.98 opportunities\\n"
             f"  Order book cache TTL: {self._cache_ttl_seconds}s (rate limit protection)\\n"
-            f"  WebSocket Mode: {'ENABLED' if market_data_manager else 'DISABLED (REST fallback)'}"
+            f"  WebSocket Mode: {'ENABLED' if market_data_manager else 'DISABLED (REST fallback)'}\\n"
+            f"  SMART SLIPPAGE: Depth-based ({SLIPPAGE_TIGHT:.3f} - {SLIPPAGE_LOOSE:.3f})"
         )
+    
+    def _calculate_smart_slippage(self, available_depth: float) -> float:
+        """Calculate dynamic slippage tolerance based on order book depth
+        
+        Logic:
+        - Thin books (< 20 shares): Use tight slippage (0.002) to minimize impact
+        - Medium books (20-100 shares): Use moderate slippage (0.005)
+        - Deep books (> 100 shares): Use loose slippage (0.010) for more opportunities
+        
+        Args:
+            available_depth: Number of shares available at best ask
+            
+        Returns:
+            Maximum slippage tolerance for this leg (in dollars)
+        """
+        if available_depth < DEPTH_THRESHOLD_THIN:
+            # Thin book - tighten slippage to avoid impact
+            return SLIPPAGE_TIGHT
+        elif available_depth < DEPTH_THRESHOLD_MEDIUM:
+            # Medium depth - use moderate slippage
+            return SLIPPAGE_MODERATE
+        else:
+            # Deep book - can afford looser slippage
+            return SLIPPAGE_LOOSE
 
     async def scan_markets(
         self,
@@ -628,11 +663,38 @@ class AtomicExecutor:
         self._budget_used = Decimal('0')
         self._max_budget = Decimal(str(TOTAL_ARBITRAGE_BUDGET))
         
+        # Create scanner instance for smart slippage calculation
+        self._scanner = None  # Will be set by _calculate_smart_slippage if needed
+        
         logger.info(
             f"AtomicExecutor initialized - "
             f"FOK mode, Max budget: ${TOTAL_ARBITRAGE_BUDGET}, "
-            f"Max slippage per leg: ${MAX_SLIPPAGE_PER_LEG}"
+            f"Smart slippage: {SLIPPAGE_TIGHT:.3f} - {SLIPPAGE_LOOSE:.3f} (depth-based)"
         )
+    
+    def _calculate_smart_slippage(self, available_depth: float) -> float:
+        """Calculate dynamic slippage tolerance based on order book depth
+        
+        Logic:
+        - Thin books (< 20 shares): Use tight slippage (0.002) to minimize impact
+        - Medium books (20-100 shares): Use moderate slippage (0.005)
+        - Deep books (> 100 shares): Use loose slippage (0.010) for more opportunities
+        
+        Args:
+            available_depth: Number of shares available at best ask
+            
+        Returns:
+            Maximum slippage tolerance for this leg (in dollars)
+        """
+        if available_depth < DEPTH_THRESHOLD_THIN:
+            # Thin book - tighten slippage to avoid impact
+            return SLIPPAGE_TIGHT
+        elif available_depth < DEPTH_THRESHOLD_MEDIUM:
+            # Medium depth - use moderate slippage
+            return SLIPPAGE_MODERATE
+        else:
+            # Deep book - can afford looser slippage
+            return SLIPPAGE_LOOSE
 
     async def execute(
         self,
@@ -680,12 +742,16 @@ class AtomicExecutor:
                     order_cost = shares_to_buy * outcome.ask_price
                     expected_slippage = abs(outcome.ask_price - outcome.yes_price)
                     
+                    # SMART SLIPPAGE: Calculate dynamic slippage based on depth
+                    max_slippage = self._calculate_smart_slippage(outcome.available_depth)
+                    
                     # Validate slippage constraint
-                    if expected_slippage > MAX_SLIPPAGE_PER_LEG:
+                    if expected_slippage > max_slippage:
                         raise SlippageExceededError(
-                            f"Slippage ${expected_slippage:.4f} exceeds max ${MAX_SLIPPAGE_PER_LEG}",
+                            f"Slippage ${expected_slippage:.4f} exceeds smart max ${max_slippage:.4f} "
+                            f"(depth: {outcome.available_depth:.1f} shares)",
                             expected=expected_slippage,
-                            maximum=MAX_SLIPPAGE_PER_LEG
+                            maximum=max_slippage
                         )
                     
                     # Place BUY order with FOK
@@ -693,14 +759,15 @@ class AtomicExecutor:
                         token_id=outcome.token_id,
                         side='BUY',
                         size=order_cost,
-                        max_slippage=MAX_SLIPPAGE_PER_LEG / outcome.ask_price,
+                        max_slippage=max_slippage / outcome.ask_price,
                         is_shares=True  # Buy by shares, not USD
                     )
                     
                     order_id = order_result.get('order_id')
                     logger.debug(
                         f"[{execution_id}] Outcome {outcome.outcome_index}: "
-                        f"Order {order_id} placed for {shares_to_buy} shares"
+                        f"Order {order_id} placed for {shares_to_buy} shares "
+                        f"(slippage: {max_slippage:.4f}, depth: {outcome.available_depth:.1f})"
                     )
                     return (outcome.token_id, order_id, outcome.outcome_index, None)
                     
