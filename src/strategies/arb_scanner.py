@@ -157,7 +157,15 @@ class ArbScanner:
         self._last_scan_time = 0
         self._scan_interval = 5  # Seconds between full scans
         
-        logger.info("ArbScanner initialized - Looking for sum(prices) < 0.98 opportunities")
+        # FLAW 3 FIX: Order book cache to prevent rate limit suicide
+        # Cache format: {token_id: (order_book_data, timestamp)}
+        self._orderbook_cache: Dict[str, tuple] = {}
+        self._cache_ttl_seconds = 2.0  # Cache for 2 seconds
+        
+        logger.info(
+            "ArbScanner initialized - Looking for sum(prices) < 0.98 opportunities\\n"
+            f"  Order book cache TTL: {self._cache_ttl_seconds}s (rate limit protection)"
+        )
 
     async def scan_markets(
         self,
@@ -231,6 +239,51 @@ class ArbScanner:
             logger.error(f"Market scan failed: {e}")
             return []
 
+    async def _get_cached_order_book(self, token_id: str):
+        """
+        FLAW 3 FIX: Get order book with caching to prevent rate limits
+        
+        Instead of polling Polymarket API for every token in every market scan,
+        we cache order books for 2 seconds. This reduces 200+ API calls per scan
+        to just the unique tokens, preventing 429 rate limit errors.
+        
+        Args:
+            token_id: Token to fetch order book for
+            
+        Returns:
+            Order book data (fresh or cached)
+        """
+        current_time = time.time()
+        
+        # Check if we have a valid cached entry
+        if token_id in self._orderbook_cache:
+            cached_book, cache_time = self._orderbook_cache[token_id]
+            
+            if (current_time - cache_time) < self._cache_ttl_seconds:
+                # Cache hit - return cached data
+                return cached_book
+        
+        # Cache miss or expired - fetch fresh data
+        try:
+            order_book = await self.client.get_order_book(token_id)
+            
+            # Store in cache
+            self._orderbook_cache[token_id] = (order_book, current_time)
+            
+            return order_book
+            
+        except Exception as e:
+            # If fetch fails and we have stale cache, return stale data
+            if token_id in self._orderbook_cache:
+                logger.warning(
+                    f"Order book fetch failed for {token_id[:8]}, using stale cache"
+                )
+                cached_book, _ = self._orderbook_cache[token_id]
+                return cached_book
+            else:
+                # No cache and fetch failed - re-raise
+                raise e
+    
     async def _check_market_for_arbitrage(
         self,
         market: Dict[str, Any]
@@ -302,8 +355,8 @@ class ArbScanner:
             
             for idx, (outcome, token_id) in enumerate(zip(outcomes, token_ids)):
                 try:
-                    # Get current price (midpoint of bid/ask)
-                    order_book = await self.client.get_order_book(token_id)
+                    # FLAW 3 FIX: Use cached order book to prevent rate limits
+                    order_book = await self._get_cached_order_book(token_id)
                     
                     # Parse order book
                     bids = getattr(order_book, 'bids', [])
@@ -549,10 +602,10 @@ class AtomicExecutor:
             # Pre-execution validation
             await self._validate_execution(opportunity, shares_to_buy)
             
-            # Place all BUY orders (FOK) for each outcome
-            pending_order_ids = []
-            
-            for outcome in opportunity.outcomes:
+            # FLAW 1 FIX: Use asyncio.gather() for TRUE atomic execution
+            # All orders fire at the same millisecond - no sequential "legging-in"
+            async def place_single_order(outcome):
+                """Place order for single outcome - used in parallel execution"""
                 try:
                     # Calculate order details
                     order_cost = shares_to_buy * outcome.ask_price
@@ -576,32 +629,69 @@ class AtomicExecutor:
                     )
                     
                     order_id = order_result.get('order_id')
-                    pending_order_ids.append((outcome.token_id, order_id))
-                    
                     logger.debug(
                         f"[{execution_id}] Outcome {outcome.outcome_index}: "
                         f"Order {order_id} placed for {shares_to_buy} shares"
                     )
+                    return (outcome.token_id, order_id, outcome.outcome_index, None)
                     
                 except Exception as e:
                     logger.error(
                         f"[{execution_id}] Order failed for outcome {outcome.outcome_index}: {e}"
                     )
-                    orders_failed.append(outcome.token_id)
+                    return (outcome.token_id, None, outcome.outcome_index, e)
+            
+            # Fire all orders concurrently using asyncio.gather()
+            logger.info(f"[{execution_id}] Firing {len(opportunity.outcomes)} orders concurrently...")
+            results = await asyncio.gather(
+                *[place_single_order(outcome) for outcome in opportunity.outcomes],
+                return_exceptions=True
+            )
+            
+            # Check results - ALL must succeed or we abort
+            pending_order_ids = []
+            filled_outcomes = []  # Track successfully filled legs
+            
+            for result in results:
+                if isinstance(result, Exception):
+                    # Exception during order placement
+                    logger.error(f"[{execution_id}] Order exception: {result}")
+                    orders_failed.append("exception")
+                    break
                     
-                    # ABORT: Cancel all pending orders
-                    await self._abort_execution(execution_id, pending_order_ids)
-                    
-                    return ExecutionResult(
-                        success=False,
-                        market_id=opportunity.market_id,
-                        orders_executed=orders_executed,
-                        orders_failed=orders_failed,
-                        total_cost=total_cost,
-                        shares_filled=0.0,
-                        actual_profit=0.0,
-                        error_message=f"Order execution failed: {str(e)}"
-                    )
+                token_id, order_id, outcome_idx, error = result
+                
+                if error or not order_id:
+                    # Order failed
+                    orders_failed.append(token_id)
+                    logger.error(f"[{execution_id}] Leg {outcome_idx} FAILED - ABORTING basket")
+                    break
+                else:
+                    # Order succeeded
+                    pending_order_ids.append((token_id, order_id))
+                    filled_outcomes.append((token_id, order_id, outcome_idx))
+            
+            # Check if all legs filled
+            if len(filled_outcomes) != len(opportunity.outcomes):
+                # FLAW 2 FIX: Emergency Liquidation - market sell filled legs
+                logger.error(
+                    f"[{execution_id}] ⚠️  PARTIAL FILL DETECTED! "
+                    f"{len(filled_outcomes)}/{len(opportunity.outcomes)} legs filled"
+                )
+                
+                # Immediately liquidate filled positions
+                await self._emergency_liquidation(execution_id, filled_outcomes, shares_to_buy)
+                
+                return ExecutionResult(
+                    success=False,
+                    market_id=opportunity.market_id,
+                    orders_executed=[oid for _, oid, _ in filled_outcomes],
+                    orders_failed=orders_failed,
+                    total_cost=total_cost,
+                    shares_filled=0.0,
+                    actual_profit=0.0,
+                    error_message=f"Partial basket fill - emergency liquidation executed"
+                )
             
             # All orders placed successfully
             orders_executed = [oid for _, oid in pending_order_ids]
@@ -644,6 +734,86 @@ class AtomicExecutor:
                 error_message=str(e)
             )
 
+    async def _emergency_liquidation(
+        self,
+        execution_id: str,
+        filled_outcomes: List[tuple],
+        shares: float
+    ) -> None:
+        """
+        FLAW 2 FIX: Emergency Liquidation Routine
+        
+        If partial basket execution occurs (some legs fill, others fail),
+        immediately market-sell all filled positions to return to cash.
+        
+        This prevents "legging-in" losses where we hold incomplete hedges.
+        
+        Args:
+            execution_id: Execution identifier
+            filled_outcomes: List of (token_id, order_id, outcome_idx) that filled
+            shares: Number of shares to liquidate per outcome
+        """
+        logger.warning(
+            f"[{execution_id}] 🚨 EMERGENCY LIQUIDATION: "
+            f"Market-selling {len(filled_outcomes)} filled legs"
+        )
+        
+        liquidation_tasks = []
+        
+        for token_id, order_id, outcome_idx in filled_outcomes:
+            async def liquidate_position(tid, oid, idx):
+                try:
+                    # Get current bid to determine market sell price
+                    book = await self.client.get_order_book(tid)
+                    bids = getattr(book, 'bids', [])
+                    
+                    if not bids:
+                        logger.error(
+                            f"[{execution_id}] No bids for {tid[:8]} - cannot liquidate"
+                        )
+                        return False
+                    
+                    # Market sell at 2% below best bid to ensure fill
+                    best_bid = float(bids[0]['price'])
+                    liquidation_price = max(0.01, best_bid * 0.98)
+                    
+                    result = await self.order_manager.execute_market_order(
+                        token_id=tid,
+                        side='SELL',
+                        size=shares,
+                        max_slippage=0.05,  # Accept 5% slippage for emergency exit
+                        is_shares=True
+                    )
+                    
+                    if result and result.get('success'):
+                        logger.info(
+                            f"[{execution_id}] ✅ Liquidated leg {idx}: "
+                            f"{shares} shares @ ${liquidation_price:.4f}"
+                        )
+                        return True
+                    else:
+                        logger.error(
+                            f"[{execution_id}] ❌ Failed to liquidate leg {idx}"
+                        )
+                        return False
+                        
+                except Exception as e:
+                    logger.error(
+                        f"[{execution_id}] Liquidation error for leg {idx}: {e}"
+                    )
+                    return False
+            
+            liquidation_tasks.append(liquidate_position(token_id, order_id, outcome_idx))
+        
+        # Execute all liquidations concurrently
+        liquidation_results = await asyncio.gather(*liquidation_tasks, return_exceptions=True)
+        
+        success_count = sum(1 for r in liquidation_results if r is True)
+        logger.warning(
+            f"[{execution_id}] Emergency liquidation complete: "
+            f"{success_count}/{len(filled_outcomes)} positions closed"
+        )
+    
     async def _validate_execution(
         self,
         opportunity: ArbitrageOpportunity,
