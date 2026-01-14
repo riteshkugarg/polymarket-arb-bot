@@ -26,6 +26,7 @@ from core.order_manager import OrderManager
 from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor
 from core.maker_executor import get_maker_executor
 from strategies.arbitrage_strategy import ArbitrageStrategy
+from strategies.arb_scanner import ArbScanner
 from config.constants import (
     LOOP_INTERVAL_SEC,
     HEALTH_CHECK_INTERVAL_SEC,
@@ -273,8 +274,8 @@ class PolymarketBot:
             self.atomic_executor = AtomicDepthAwareExecutor(self.client, self.order_manager)
             logger.info("AtomicDepthAwareExecutor initialized")
             
-            # Initialize arbitrage strategy with atomic executor
-            arb_strategy = ArbitrageStrategy(
+            # Initialize arbitrage scanner (not the abstract ArbitrageStrategy)
+            arb_strategy = ArbScanner(
                 self.client,
                 self.order_manager,
                 atomic_executor=self.atomic_executor

@@ -81,6 +81,9 @@ class PlainTextFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as plain text for console"""
+        # Generate asctime attribute (required before accessing record.asctime)
+        record.asctime = self.formatTime(record, self.datefmt)
+        
         if record.exc_info:
             # Include exception details
             exc_text = self.formatException(record.exc_info)
