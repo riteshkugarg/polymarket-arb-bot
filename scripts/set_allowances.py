@@ -183,56 +183,15 @@ def main():
             logger.error("❌ USDC approval transaction failed")
             sys.exit(1)
     
-    # Approve CTF
+    # Note: CTF tokens use ERC1155 standard, not ERC20
+    # Approvals are handled automatically by the Polymarket SDK
+    # Only USDC approval is required for NegRisk operations
     logger.info("\n" + "=" * 80)
-    logger.info("Setting CTF Allowance")
+    logger.info("✅ CTF Token Handling")
     logger.info("=" * 80)
-    
-    ctf_contract = web3.eth.contract(
-        address=Web3.to_checksum_address(CTF_EXCHANGE_ADDRESS),
-        abi=ERC20_ABI
-    )
-    
-    # Check current allowance
-    current_ctf_allowance = ctf_contract.functions.allowance(
-        Web3.to_checksum_address(wallet_address),
-        Web3.to_checksum_address(NEGRISK_ADAPTER_ADDRESS)
-    ).call()
-    
-    logger.info(f"Current CTF allowance: {current_ctf_allowance}")
-    
-    if current_ctf_allowance >= 10**30:  # Already has sufficient allowance
-        logger.info("✅ CTF allowance already set (sufficient)")
-    else:
-        logger.info("Setting infinite CTF allowance...")
-        
-        # Build transaction
-        tx = ctf_contract.functions.approve(
-            Web3.to_checksum_address(NEGRISK_ADAPTER_ADDRESS),
-            infinite_approval
-        ).build_transaction({
-            'from': wallet_address,
-            'nonce': web3.eth.get_transaction_count(wallet_address),
-            'gas': 100000,
-            'gasPrice': web3.eth.gas_price,
-        })
-        
-        # Sign transaction
-        signed_tx = web3.eth.account.sign_transaction(tx, private_key)
-        
-        # Send transaction
-        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        logger.info(f"Transaction sent: {tx_hash.hex()}")
-        
-        # Wait for receipt
-        logger.info("Waiting for confirmation...")
-        receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        
-        if receipt['status'] == 1:
-            logger.info("✅ CTF allowance set successfully")
-        else:
-            logger.error("❌ CTF approval transaction failed")
-            sys.exit(1)
+    logger.info("CTF tokens use ERC1155 standard (not ERC20)")
+    logger.info("Approvals are managed automatically by Polymarket SDK")
+    logger.info("No manual approval needed for CTF tokens")
     
     # Final summary
     logger.info("\n" + "=" * 80)
