@@ -70,7 +70,9 @@ logger = get_logger(__name__)
 
 
 # Constants for arbitrage logic
-TAKER_FEE_PERCENT = 0.015  # 1.5% per trade
+# COMPETITIVE BUFFER: 1.2% (allows competing with 1% fee tier traders)
+# Previous: 1.5% (too conservative - missed opportunities to competitors)
+TAKER_FEE_PERCENT = 0.012  # 1.2% per trade (institution-grade competitive)
 ARBITRAGE_OPPORTUNITY_THRESHOLD = 0.98  # sum(prices) < 0.98
 TAKER_FEE_BUFFER = TAKER_FEE_PERCENT  # Account for fee in opportunity detection
 FINAL_THRESHOLD = ARBITRAGE_OPPORTUNITY_THRESHOLD  # sum < 0.98 after fee buffer

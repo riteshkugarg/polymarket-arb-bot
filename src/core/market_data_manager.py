@@ -126,11 +126,17 @@ class MarketStateCache:
     Safety Guards (Institutional-Grade):
     ------------------------------------
     - Timestamp Integrity: Rejects messages older than current cache state
-    - Lag Circuit Breaker: Flags markets with data >2s old
+    - Lag Circuit Breaker: HFT-GRADE 500ms threshold (was 2s - too slow)
     - Thread Safety: All operations protected by RLock
     """
     
-    def __init__(self, stale_threshold_seconds: float = 2.0):
+    def __init__(self, stale_threshold_seconds: float = 0.5):
+        """Initialize market state cache
+        
+        HFT-GRADE STALENESS: 500ms default (was 2.0s)
+        Per institution-grade review: 2s data is toxic in fast markets
+        (political debates, sports events require sub-second freshness)
+        """
         self._cache: Dict[str, MarketSnapshot] = {}
         self._lock = Lock()
         self._stale_threshold = stale_threshold_seconds
@@ -839,7 +845,7 @@ class MarketDataManager:
     def __init__(
         self,
         client: Any,
-        stale_threshold: float = 2.0,
+        stale_threshold: float = 0.5,  # HFT-GRADE: 500ms default (was 2.0s)
         ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     ):
         self.client = client

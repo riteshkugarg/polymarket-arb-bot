@@ -597,8 +597,10 @@ MM_EMERGENCY_EXIT_THRESHOLD: Final[float] = 0.15
 # Order Management
 # -----------------
 # Quote update frequency (seconds)
-# How often to cancel/replace quotes with updated prices
-MM_QUOTE_UPDATE_INTERVAL: Final[int] = 20
+# INSTITUTION-GRADE: 3s refresh (was 20s)
+# Per optimization: With WebSockets, can refresh faster without rate limits
+# 20s was too slow - quotes go stale in fast markets (debates, sports)
+MM_QUOTE_UPDATE_INTERVAL: Final[int] = 3
 
 # Order time-to-live (seconds)
 # Cancel and replace orders after this duration even if not filled

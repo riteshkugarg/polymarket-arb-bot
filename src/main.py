@@ -282,7 +282,7 @@ class PolymarketBot:
             try:
                 self.market_data_manager = MarketDataManager(
                     client=self.client,
-                    stale_threshold=2.0,  # 2-second staleness protection
+                    stale_threshold=0.5,  # HFT-GRADE: 500ms staleness (was 2.0s - too slow for fast markets)
                     ws_url="wss://ws-subscriptions-clob.polymarket.com/ws/market"
                 )
                 await self.market_data_manager.initialize()
