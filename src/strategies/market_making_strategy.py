@@ -345,6 +345,11 @@ class MarketMakingStrategy(BaseStrategy):
         """Public property for health checks to access running state"""
         return self._is_running
     
+    @is_running.setter
+    def is_running(self, value: bool) -> None:
+        """Allow BaseStrategy to set running state"""
+        self._is_running = value
+    
     async def run(self) -> None:
         """Main strategy loop"""
         if self._is_running:
