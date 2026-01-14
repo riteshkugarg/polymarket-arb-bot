@@ -359,13 +359,6 @@ class MarketMakingStrategy(BaseStrategy):
                 self.on_websocket_disconnection
             )
             logger.info("✅ Registered disconnection handler for Flash Cancel")
-            
-            # INSTITUTIONAL SAFETY: Register disconnection handler for Flash Cancel
-            self._market_data_manager.cache.register_disconnection_handler(
-                'market_making_flash_cancel',
-                self.on_websocket_disconnection
-            )
-            logger.info("✅ Registered disconnection handler for Flash Cancel")
     
     async def handle_fill_event(self, fill: FillEvent) -> None:
         """
