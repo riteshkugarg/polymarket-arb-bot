@@ -556,8 +556,18 @@ class PolymarketWSManager:
                 # Skip ping/pong frames and empty messages
                 if not message or not isinstance(message, str):
                     continue
-                    
-                data = json.loads(message)
+                
+                # Parse JSON with error handling for empty messages
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    # Skip empty or malformed messages (common with Polymarket WS)
+                    continue
+                
+                # Handle unexpected message formats (lists, None, etc.)
+                if not isinstance(data, dict):
+                    logger.debug(f"Skipping non-dict message: {type(data)}")
+                    continue
                 
                 # Route message to appropriate queue
                 # Per Polymarket support: messages use 'event_type' field
