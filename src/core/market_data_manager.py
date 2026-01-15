@@ -573,6 +573,13 @@ class PolymarketWSManager:
                 # Per Polymarket support: messages use 'event_type' field
                 event_type = data.get('event_type') or data.get('type')
                 
+                # Debug: Log first few messages to verify format
+                if not hasattr(self, '_debug_msg_count'):
+                    self._debug_msg_count = 0
+                if self._debug_msg_count < 5:
+                    logger.info(f"[WS DEBUG] Received message: event_type={event_type}, keys={list(data.keys())[:10]}")
+                    self._debug_msg_count += 1
+                
                 # Market channel events: book, price_change, last_trade_price
                 if event_type in ['book', 'price_change', 'last_trade_price']:
                     # Order book update
@@ -842,7 +849,7 @@ class PolymarketWSManager:
                 await self._ws.send(json.dumps(subscribe_msg))
                 self._subscribed_assets.add(asset_id)
                 
-                logger.info(f"Subscribed to asset: {asset_id[:8]}...")
+                logger.info(f"[WS] Subscribed to asset: {asset_id[:8]}... (full ID: {asset_id})")
                 
             except Exception as e:
                 logger.error(f"Subscription error for {asset_id[:8]}...: {e}")
