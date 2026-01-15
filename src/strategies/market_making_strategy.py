@@ -1035,14 +1035,23 @@ class MarketMakingStrategy(BaseStrategy):
         calculated_threshold = target_position_size * volume_multiplier
         
         # Step D: Apply hard floor (safety guard)
+        # For Polymarket's low-volume environment, use the FLOOR as default
+        # Only increase threshold if calculated value is higher AND account has sufficient capital
         hard_floor = Decimal(str(MM_HARD_FLOOR_VOLUME))
-        dynamic_min_volume = max(calculated_threshold, hard_floor)
+        
+        # Use floor for small accounts, calculated threshold for large accounts
+        # This ensures small accounts can still find markets to trade
+        if current_balance < Decimal('500'):  # Small account threshold
+            dynamic_min_volume = hard_floor
+        else:
+            dynamic_min_volume = max(calculated_threshold, hard_floor)
         
         logger.debug(
             f"[ADAPTIVE FILTER] Balance: ${current_balance:.2f}, "
             f"Target/Market: ${target_position_size:.2f}, "
+            f"Calculated: ${calculated_threshold:.2f}, "
             f"Dynamic Threshold: ${dynamic_min_volume:.2f}/day "
-            f"({'hard floor' if dynamic_min_volume == hard_floor else 'calculated'})"
+            f"({'hard floor (small account)' if dynamic_min_volume == hard_floor and current_balance < 500 else 'hard floor' if dynamic_min_volume == hard_floor else 'calculated'})"
         )
         
         return dynamic_min_volume
