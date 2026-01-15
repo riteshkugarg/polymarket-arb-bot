@@ -1603,11 +1603,66 @@ class MarketMakingStrategy(BaseStrategy):
             logger.info(f"🔍 volumeNum={market.get('volumeNum')}, volume24hr={market.get('volume24hr')}")
             logger.info(f"🔍 liquidityNum={market.get('liquidityNum')}, liquidity={market.get('liquidity')}")
             logger.info(f"🔍 enableOrderBook={market.get('enableOrderBook')}, active={market.get('active')}, closed={market.get('closed')}")
+            
+            # CRITICAL DEBUG: Check what's actually in clobTokenIds and outcomes
+            clob_token_ids_raw = market.get('clobTokenIds')
+            outcomes_raw = market.get('outcomes')
+            logger.info(f"🔍 clobTokenIds: {clob_token_ids_raw} (type: {type(clob_token_ids_raw).__name__}, len: {len(clob_token_ids_raw) if clob_token_ids_raw else 'N/A'})")
+            logger.info(f"🔍 outcomes: {outcomes_raw} (type: {type(outcomes_raw).__name__}, len: {len(outcomes_raw) if outcomes_raw else 'N/A'})")
         
-        # Binary market check (Gamma API uses 'clobTokenIds' for markets)
-        # Note: 'outcomes' field is for EVENTS, not markets
-        clob_token_ids = market.get('clobTokenIds', [])
-        if MM_PREFER_BINARY_MARKETS and len(clob_token_ids) != 2:
+        # Binary market check (Gamma API - Per Polymarket Support Jan 2026)
+        # CRITICAL: Fields come as JSON-encoded strings, NOT native arrays
+        # Example: outcomes = '["Yes","No"]' (string), not ['Yes', 'No'] (list)
+        # Must parse JSON first, then check length
+        
+        # Try multiple fields for redundancy (outcomes, outcomePrices, clobTokenIds)
+        import json
+        outcome_count = None
+        
+        # Method 1: Parse outcomes field
+        outcomes_raw = market.get('outcomes')
+        if outcomes_raw:
+            try:
+                if isinstance(outcomes_raw, str):
+                    outcomes_parsed = json.loads(outcomes_raw)
+                else:
+                    outcomes_parsed = outcomes_raw
+                outcome_count = len(outcomes_parsed)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Method 2: Parse outcomePrices field (fallback)
+        if outcome_count is None:
+            outcome_prices_raw = market.get('outcomePrices')
+            if outcome_prices_raw:
+                try:
+                    if isinstance(outcome_prices_raw, str):
+                        outcome_prices_parsed = json.loads(outcome_prices_raw)
+                    else:
+                        outcome_prices_parsed = outcome_prices_raw
+                    outcome_count = len(outcome_prices_parsed)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        
+        # Method 3: Parse clobTokenIds (last resort)
+        if outcome_count is None:
+            clob_token_ids_raw = market.get('clobTokenIds')
+            if clob_token_ids_raw:
+                try:
+                    if isinstance(clob_token_ids_raw, str):
+                        clob_token_ids_parsed = json.loads(clob_token_ids_raw)
+                    else:
+                        clob_token_ids_parsed = clob_token_ids_raw
+                    outcome_count = len(clob_token_ids_parsed)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        
+        # If we couldn't determine outcome count, reject (safety)
+        if outcome_count is None:
+            return (False, 'not_binary')
+        
+        # Check if binary (exactly 2 outcomes)
+        if MM_PREFER_BINARY_MARKETS and outcome_count != 2:
             return (False, 'not_binary')
         
         # MICROSTRUCTURE: CLOB status (Gamma API - Official per Polymarket Support)
@@ -1695,9 +1750,26 @@ class MarketMakingStrategy(BaseStrategy):
         - Check CLOB active (enableOrderBook not false)
         - Validate tick size and order constraints if available
         """
-        # Binary market check (Gamma API uses 'clobTokenIds')
-        clob_token_ids = market.get('clobTokenIds', [])
-        if MM_PREFER_BINARY_MARKETS and len(clob_token_ids) != 2:
+        # Binary market check (Gamma API - Per Polymarket Support Jan 2026)
+        # CRITICAL: Fields are JSON-encoded strings, NOT native arrays
+        import json
+        outcome_count = None
+        
+        # Try parsing outcomes or outcomePrices (safest per Polymarket support)
+        for field in ['outcomes', 'outcomePrices', 'clobTokenIds']:
+            field_value = market.get(field)
+            if field_value:
+                try:
+                    if isinstance(field_value, str):
+                        parsed = json.loads(field_value)
+                    else:
+                        parsed = field_value
+                    outcome_count = len(parsed)
+                    break
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        
+        if outcome_count is None or (MM_PREFER_BINARY_MARKETS and outcome_count != 2):
             return False
         
         # MICROSTRUCTURE: CLOB status
