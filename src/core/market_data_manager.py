@@ -638,23 +638,42 @@ class PolymarketWSManager:
                 # Handle different event types
                 if event_type == 'price_change':
                     # Price change events: {"market": "...", "price_changes": [...], "timestamp": ...}
+                    # Per Polymarket support: WebSocket for price updates, REST /book for full depth
                     price_changes = data.get('price_changes', [])
                     if not price_changes:
                         continue
                     
-                    # Update cache with price changes (no full order book)
+                    # Update timestamps only - keep data fresh to avoid stale warnings
+                    # Market maker will use REST /book when it needs full order book depth
                     for change in price_changes:
                         token_id = change.get('token_id')
                         price = change.get('price')
                         if token_id and price:
-                            # Simple price update without full book
-                            self.cache.update_market_prices(
-                                asset_id=token_id,
-                                best_bid=float(price),
-                                best_ask=float(price),
-                                mid_price=float(price),
-                                timestamp=time.time()
-                            )
+                            # Check if we have existing cache data
+                            existing = self.cache.get(token_id)
+                            if existing:
+                                # Update timestamp to keep cache fresh, preserve existing bid/ask/depth
+                                existing.last_update = time.time()
+                                existing.mid_price = float(price)
+                                existing.micro_price = float(price)
+                                self.cache.update(token_id, existing, force=True)
+                            else:
+                                # No cache yet - create minimal snapshot (will trigger REST fallback)
+                                # Market making needs full depth from REST API
+                                snapshot = MarketSnapshot(
+                                    asset_id=token_id,
+                                    best_bid=float(price),
+                                    best_ask=float(price),
+                                    bid_size=0.0,  # Unknown - use REST /book
+                                    ask_size=0.0,  # Unknown - use REST /book
+                                    mid_price=float(price),
+                                    micro_price=float(price),
+                                    obi=0.0,
+                                    last_update=time.time(),
+                                    bids=[],  # Empty - needs REST /book for full depth
+                                    asks=[]   # Empty - needs REST /book for full depth
+                                )
+                                self.cache.update(token_id, snapshot, force=True)
                     continue
                 
                 # Extract order book data (for 'book' events)
