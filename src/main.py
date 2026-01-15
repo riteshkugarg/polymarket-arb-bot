@@ -13,6 +13,7 @@ import time
 import json
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from decimal import Decimal
 from collections import deque
 from pathlib import Path
 from web3 import Web3
