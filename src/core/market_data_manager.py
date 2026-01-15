@@ -676,7 +676,10 @@ class PolymarketWSManager:
                                 self.cache.update(token_id, snapshot, force=True)
                     continue
                 
-                # Extract order book data (for 'book' events)
+                # Handle 'book' events - FULL ORDER BOOK SNAPSHOTS
+                # Per Polymarket Support (Jan 2026): "Book events are full snapshots, not deltas"
+                # These arrive when orders are placed/cancelled (may be infrequent for inactive markets)
+                # Extract order book data
                 # Per Polymarket support: book events use 'buys' and 'sells' (not bids/asks)
                 bids = data.get('buys', data.get('bids', []))  # Try 'buys' first, fallback to 'bids'
                 asks = data.get('sells', data.get('asks', []))  # Try 'sells' first, fallback to 'asks'
@@ -882,7 +885,19 @@ class PolymarketWSManager:
                 logger.error(f"Stale monitor error: {e}")
     
     async def subscribe_assets(self, asset_ids: List[str]) -> None:
-        """Subscribe to real-time order book updates for assets"""
+        """Subscribe to real-time order book updates for assets
+        
+        INSTITUTIONAL ARCHITECTURE (per Polymarket Support Jan 2026):
+        1. Subscribe to WebSocket for real-time updates
+        2. Immediately fetch REST /book snapshot for initial state
+        3. Cache full order book (buys/sells with depth)
+        4. Apply incremental updates from WebSocket (book events = full snapshots, price_change = price updates)
+        
+        This ensures:
+        - Zero-latency local order book access (no REST on every quote)
+        - Accurate depth for market making decisions
+        - Resilient to inactive markets (REST provides initial state even if no book events)
+        """
         if not self._is_connected or not self._ws:
             logger.warning("Cannot subscribe - WebSocket not connected")
             return
@@ -892,6 +907,7 @@ class PolymarketWSManager:
                 continue
             
             try:
+                # Step 1: Subscribe to WebSocket for real-time updates
                 # Polymarket WebSocket subscription format (per support: Jan 2026)
                 # Correct format: {"type":"market","assets_ids":[tokenId]}
                 subscribe_msg = {
@@ -903,6 +919,48 @@ class PolymarketWSManager:
                 self._subscribed_assets.add(asset_id)
                 
                 logger.info(f"[WS] Subscribed to asset: {asset_id[:8]}... (full ID: {asset_id})")
+                
+                # Step 2: Immediately fetch initial order book snapshot via REST
+                # Per Polymarket Support: "On connection, fetch an initial snapshot via REST /book endpoint"
+                try:
+                    book_data = await self.client.get_order_book(asset_id)
+                    if book_data:
+                        # Parse and cache order book
+                        bids = book_data.bids if hasattr(book_data, 'bids') else []
+                        asks = book_data.asks if hasattr(book_data, 'asks') else []
+                        
+                        if bids and asks:
+                            best_bid = float(bids[0]['price'])
+                            best_ask = float(asks[0]['price'])
+                            bid_size = float(bids[0].get('size', 0))
+                            ask_size = float(asks[0].get('size', 0))
+                            
+                            mid_price = (best_bid + best_ask) / 2.0
+                            total_vol = bid_size + ask_size
+                            micro_price = ((bid_size * best_ask) + (ask_size * best_bid)) / total_vol if total_vol > 0 else mid_price
+                            obi = (bid_size - ask_size) / total_vol if total_vol > 0 else 0.0
+                            
+                            # Create snapshot and cache
+                            snapshot = MarketSnapshot(
+                                asset_id=asset_id,
+                                best_bid=best_bid,
+                                best_ask=best_ask,
+                                bid_size=bid_size,
+                                ask_size=ask_size,
+                                mid_price=mid_price,
+                                micro_price=micro_price,
+                                obi=obi,
+                                last_update=time.time(),
+                                bids=bids,
+                                asks=asks
+                            )
+                            self.cache.update(asset_id, snapshot, force=True)
+                            logger.info(f"[REST] Cached initial order book for {asset_id[:8]}... (bid: {best_bid}, ask: {best_ask}, depth: {len(bids)}x{len(asks)})")
+                        else:
+                            logger.warning(f"[REST] Empty order book for {asset_id[:8]}... (may be inactive)")
+                except Exception as e:
+                    logger.error(f"[REST] Failed to fetch initial snapshot for {asset_id[:8]}...: {e}")
+                    # Continue anyway - WebSocket updates will populate cache when book events arrive
                 
             except Exception as e:
                 logger.error(f"Subscription error for {asset_id[:8]}...: {e}")
