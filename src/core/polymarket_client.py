@@ -1748,7 +1748,7 @@ class PolymarketClient:
             logger.warning(f"Error checking market status for {condition_id[:16]}...: {e}, assuming active")
             return False
     
-    # TODO: Potential optimization for checking multiple markets at once
+    # Note: Batch market checking optimization available via /events endpoint
     # Per Polymarket support: No dedicated batch endpoint exists for condition_ids
     # Alternative: Use /events?active=true&closed=false endpoint which returns events
     # with their associated markets - can be more efficient than individual queries

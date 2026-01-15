@@ -80,20 +80,6 @@ class MakerFirstExecutor:
         # throughput for high-frequency trading (multiple orders per second)
         self._process_pool = ProcessPoolExecutor(max_workers=2)  # 2 workers for signing
         logger.info("🔐 Process pool initialized for HFT signing (2 workers)")
-        
-        # FIX 1: Process pool for CPU-intensive signing operations
-        # Signing ECDSA/EIP-712 signatures is CPU-bound, not I/O-bound
-        # Using ProcessPoolExecutor instead of asyncio.to_thread improves
-        # throughput for high-frequency trading (multiple orders per second)
-        self._process_pool = ProcessPoolExecutor(max_workers=2)  # 2 workers for signing
-        logger.info("🔐 Process pool initialized for HFT signing (2 workers)")
-        
-        # FIX 1: Process pool for CPU-intensive signing operations
-        # Signing ECDSA/EIP-712 signatures is CPU-bound, not I/O-bound
-        # Using ProcessPoolExecutor instead of asyncio.to_thread improves
-        # throughput for high-frequency trading (multiple orders per second)
-        self._process_pool = ProcessPoolExecutor(max_workers=2)  # 2 workers for signing
-        logger.info("🔐 Process pool initialized for HFT signing (2 workers)")
     
     async def start_monitoring(self) -> None:
         """Start background order monitoring task"""
@@ -112,24 +98,6 @@ class MakerFirstExecutor:
             except asyncio.CancelledError:
                 pass
         logger.info("📊 Order monitoring stopped")
-    
-    async def shutdown(self) -> None:
-        """Clean shutdown - stop monitoring and close process pool"""
-        await self.stop_monitoring()
-        
-        # FIX 1: Clean up process pool
-        if hasattr(self, '_process_pool'):
-            self._process_pool.shutdown(wait=True)
-            logger.info("🔐 Process pool shut down")
-    
-    async def shutdown(self) -> None:
-        """Clean shutdown - stop monitoring and close process pool"""
-        await self.stop_monitoring()
-        
-        # FIX 1: Clean up process pool
-        if hasattr(self, '_process_pool'):
-            self._process_pool.shutdown(wait=True)
-            logger.info("🔐 Process pool shut down")
     
     async def shutdown(self) -> None:
         """Clean shutdown - stop monitoring and close process pool"""
@@ -419,18 +387,72 @@ class MakerFirstExecutor:
             # Handle INVALID_POST_ONLY_ORDER
             if "INVALID_POST_ONLY_ORDER" in error_str or "post-only" in error_str.lower():
                 logger.warning(
-                    f"[MAKER_REJECTED] {token_id[:8]}: Order would cross spread. "
-                    f"Setting {POST_ONLY_ERROR_COOLDOWN_SEC}s cooldown."
+                    f"[MAKER_REJECTED] {token_id[:8]}: Order would cross spread @ ${target_price:.4f}. "
+                    f"Attempting 1-tick recovery..."
                 )
                 
-                self._set_cooldown(token_id, POST_ONLY_ERROR_COOLDOWN_SEC)
-                
-                raise PostOnlyOrderRejectedError(
-                    f"Post-only order rejected for {token_id[:8]} (spread crossed)",
-                    token_id=token_id,
-                    target_price=target_price if 'target_price' in locals() else None,
-                    cooldown_sec=POST_ONLY_ERROR_COOLDOWN_SEC
-                )
+                # CRITICAL FIX #3: 1-tick recovery logic
+                try:
+                    # Get tick size for market
+                    tick_size_str = await self.client.get_tick_size(token_id)
+                    tick_size = float(tick_size_str)
+                    
+                    # Widen by 1 tick (move AWAY from mid to avoid crossing)
+                    adjusted_price = target_price - tick_size
+                    adjusted_price = max(0.001, min(0.999, adjusted_price))  # Bounds check
+                    
+                    logger.info(
+                        f"[MAKER_RETRY] Retrying BUY @ ${adjusted_price:.4f} "
+                        f"(1-tick wider, tick_size=${tick_size:.4f})"
+                    )
+                    
+                    # Retry with adjusted price
+                    retry_result = await self.client.place_order(
+                        token_id=token_id,
+                        side='BUY',
+                        price=adjusted_price,
+                        size=shares,
+                        options={'post_only': True, 'neg_risk': is_negrisk}
+                    )
+                    
+                    logger.info(
+                        f"✅ [MAKER_RETRY_SUCCESS] BUY order placed @ ${adjusted_price:.4f} "
+                        f"(recovered from post-only rejection)"
+                    )
+                    
+                    # Track adjusted order
+                    order_id = retry_result.get('orderID', 'unknown')
+                    self._active_orders[order_id] = {
+                        'token_id': token_id,
+                        'side': 'BUY',
+                        'price': adjusted_price,
+                        'size': shares,
+                        'amount_usd': amount_usd,
+                        'created_at': time.time(),
+                        'condition_id': condition_id,
+                        'market_name': market_name,
+                        'outcome': outcome,
+                        'fee_rate_bps': fee_rate_bps,
+                        'is_negrisk': is_negrisk,
+                        'retry_attempt': 1
+                    }
+                    
+                    return retry_result
+                    
+                except Exception as retry_error:
+                    # Retry failed - set cooldown and raise
+                    logger.error(
+                        f"[MAKER_RETRY_FAILED] {token_id[:8]}: 1-tick recovery failed. "
+                        f"Setting {POST_ONLY_ERROR_COOLDOWN_SEC}s cooldown. Error: {retry_error}"
+                    )
+                    self._set_cooldown(token_id, POST_ONLY_ERROR_COOLDOWN_SEC)
+                    
+                    raise PostOnlyOrderRejectedError(
+                        f"Post-only order rejected for {token_id[:8]} after retry",
+                        token_id=token_id,
+                        target_price=adjusted_price if 'adjusted_price' in locals() else target_price,
+                        cooldown_sec=POST_ONLY_ERROR_COOLDOWN_SEC
+                    )
             
             # Re-raise other errors
             raise

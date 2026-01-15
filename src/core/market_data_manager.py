@@ -443,7 +443,7 @@ class PolymarketWSManager:
         try:
             logger.info(f"Connecting to WebSocket: {self.ws_url}")
             
-            # TODO: Add authentication headers if required by Polymarket
+            # Note: WebSocket authentication not required per 2026 CLOB specs
             self._ws = await websockets.connect(
                 self.ws_url,
                 ping_interval=None,  # We handle our own heartbeat

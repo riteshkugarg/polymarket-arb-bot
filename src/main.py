@@ -26,6 +26,9 @@ from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
 from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor
 from core.maker_executor import get_maker_executor
+from core.execution_gateway import ExecutionGateway, StrategyPriority
+from core.inventory_manager import InventoryManager
+from core.risk_controller import RiskController
 from strategies.arbitrage_strategy import ArbitrageStrategy
 from strategies.arb_scanner import ArbScanner
 from strategies.market_making_strategy import MarketMakingStrategy
@@ -200,6 +203,9 @@ class PolymarketBot:
         self.order_manager: Optional[OrderManager] = None
         self.atomic_executor: Optional[AtomicDepthAwareExecutor] = None
         self.maker_executor = None  # Maker-first executor (2026)
+        self.execution_gateway: Optional[ExecutionGateway] = None  # FIX 2: Centralized order routing
+        self.inventory_manager: Optional[InventoryManager] = None  # AUDIT FIX: Unified position tracking
+        self.risk_controller: Optional[RiskController] = None  # AUDIT FIX: Circuit breaker authority
         self.rebate_logger = get_rebate_logger()  # Rebate tracking
         self.strategies = []
         self.is_running = False
@@ -255,9 +261,59 @@ class PolymarketBot:
             self._shutdown_event.set()
 
     async def initialize(self) -> None:
-        """Initialize all bot components"""
+        """
+        Initialize all bot components with RISK-FIRST architecture
+        
+        Order of initialization (CRITICAL for safety):
+        1. RiskController - Circuit breaker must be active FIRST
+        2. InventoryManager - Unified position tracking authority
+        3. PolymarketClient - API client with rate limiter
+        4. Execution engines - Order routing and execution
+        5. Strategies - Trading logic (lowest priority)
+        """
         try:
-            logger.info("Initializing bot components...")
+            logger.info("="*80)
+            logger.info("INSTITUTIONAL INITIALIZATION - RISK-FIRST ARCHITECTURE")
+            logger.info("="*80)
+            
+            # ========================================================================
+            # LAYER 1: RISK MANAGEMENT (HIGHEST PRIORITY)
+            # ========================================================================
+            logger.info("\n[LAYER 1] Risk Management System")
+            
+            total_capital = ARBITRAGE_STRATEGY_CAPITAL + MARKET_MAKING_STRATEGY_CAPITAL
+            self.risk_controller = RiskController(
+                initial_capital=float(total_capital),
+                max_drawdown_pct=0.02,  # 2% kill switch
+                max_position_size_usd=5000.0,  # $5k per market
+                max_total_position_usd=50000.0,  # $50k total exposure
+                max_spread_ticks=50,  # Circuit breaker at 50-tick spread
+                drawdown_window_sec=600,  # 10-minute rolling window
+                heartbeat_timeout_sec=30  # Connection timeout
+            )
+            # Start background monitoring task
+            await self.risk_controller.start_monitoring()
+            logger.info(f"🛡️  RiskController initialized - Circuit breaker HOT")
+            logger.info(f"    Capital: ${total_capital:,.2f}, Max Drawdown: 2%, Kill Switch: ARMED")
+            
+            # ========================================================================
+            # LAYER 2: INVENTORY MANAGEMENT (CAPITAL AUTHORITY)
+            # ========================================================================
+            logger.info("\n[LAYER 2] Inventory Management System")
+            
+            self.inventory_manager = InventoryManager(
+                max_position_per_market=Decimal('5000'),  # $5k per market
+                max_gross_exposure=Decimal('50000'),  # $50k total
+                gamma=Decimal('0.2'),  # Risk aversion parameter
+                volatility_lookback_seconds=3600  # 1-hour volatility window
+            )
+            logger.info(f"✅ InventoryManager initialized - Unified position tracking")
+            logger.info(f"    Max per market: $5,000, Max total: $50,000, Gamma: 0.2")
+            
+            # ========================================================================
+            # LAYER 3: CLIENT & ORDER INFRASTRUCTURE
+            # ========================================================================
+            logger.info("\n[LAYER 3] Client Infrastructure")
             
             # Initialize Polymarket client
             self.client = PolymarketClient()
@@ -278,6 +334,17 @@ class PolymarketBot:
             self.atomic_executor = AtomicDepthAwareExecutor(self.client, self.order_manager)
             logger.info("AtomicDepthAwareExecutor initialized")
             
+            # FIX 2: Initialize ExecutionGateway (BEFORE strategies)
+            # Centralized order routing with STP and rate limiting
+            self.execution_gateway = ExecutionGateway(
+                client=self.client,
+                order_manager=self.order_manager,
+                rate_limiter=self._rate_limiter,
+                max_batch_size=MAX_BATCH_SIZE,
+                enable_stp=True  # Self-trade prevention
+            )
+            logger.info("✅ ExecutionGateway initialized (STP + priority routing)")
+            
             # WEBSOCKET ARCHITECTURE: Initialize centralized market data manager
             try:
                 self.market_data_manager = MarketDataManager(
@@ -294,29 +361,52 @@ class PolymarketBot:
                 )
                 self.market_data_manager = None
             
+            # ========================================================================
+            # LAYER 6: STRATEGIES (LOWEST PRIORITY)
+            # ========================================================================
+            logger.info("\n[LAYER 6] Trading Strategies")
+            
             # Initialize arbitrage strategy with event-driven WebSocket support
             from strategies.arbitrage_strategy import ArbitrageStrategy
             arb_strategy = ArbitrageStrategy(
                 self.client,
                 self.order_manager,
                 market_data_manager=self.market_data_manager,  # Event-driven WebSocket
-                atomic_executor=self.atomic_executor  # Depth-aware execution
+                atomic_executor=self.atomic_executor,  # Depth-aware execution
+                execution_gateway=self.execution_gateway,  # FIX 2: Centralized routing
+                inventory_manager=self.inventory_manager,  # AUDIT FIX: Unified positions
+                risk_controller=self.risk_controller  # AUDIT FIX: Circuit breaker
             )
             self.strategies.append(arb_strategy)
-            logger.info("✅ ArbitrageStrategy initialized (EVENT-DRIVEN WebSocket mode)")
+            logger.info("✅ ArbitrageStrategy initialized (EVENT-DRIVEN WebSocket + STP + Risk Controls)")
             
             # Initialize market making strategy (runs in parallel with arbitrage)
             market_making_strategy = MarketMakingStrategy(
                 self.client,
                 self.order_manager,
-                market_data_manager=self.market_data_manager  # Pass WebSocket manager
+                market_data_manager=self.market_data_manager,  # Pass WebSocket manager
+                execution_gateway=self.execution_gateway,  # FIX 2: Centralized routing
+                inventory_manager=self.inventory_manager,  # AUDIT FIX: Unified positions
+                risk_controller=self.risk_controller  # AUDIT FIX: Circuit breaker
             )
             self.strategies.append(market_making_strategy)
-            logger.info("✅ Market Making Strategy initialized (WebSocket + REST hybrid mode)")
+            logger.info("✅ Market Making Strategy initialized (WebSocket + ExecutionGateway + Risk Controls)")
             
             # Enable cross-strategy coordination
             arb_strategy.set_market_making_strategy(market_making_strategy)
-            logger.info("✅ Cross-strategy coordination enabled")
+            logger.info("✅ Cross-strategy coordination enabled (arb can pause MM)")
+            
+            # ========================================================================
+            # INITIALIZATION COMPLETE
+            # ========================================================================
+            logger.info("\n" + "="*80)
+            logger.info("🎯 RISK-FIRST ARCHITECTURE INITIALIZED SUCCESSFULLY")
+            logger.info("="*80)
+            logger.info(f"✅ RiskController: ARMED (2% kill switch, 10min rolling window)")
+            logger.info(f"✅ InventoryManager: ACTIVE (unified position tracking)")
+            logger.info(f"✅ ExecutionGateway: STP enabled, priority routing active")
+            logger.info(f"✅ Strategies: {len(self.strategies)} strategies with risk controls")
+            logger.info("="*80 + "\n")
             
             # UPGRADE 2: Initialize Web3 for NegRisk adapter interactions
             try:
@@ -391,6 +481,11 @@ class PolymarketBot:
         logger.info(f"Drawdown Limit: ${DRAWDOWN_LIMIT_USD:.2f} (Kill Switch)")
         logger.info(f"WebSocket Mode: {'ACTIVE' if self.market_data_manager else 'DISABLED (REST fallback)'}")
         logger.info("=" * 80)
+        
+        # FIX 4: Start ExecutionGateway BEFORE strategies
+        if self.execution_gateway:
+            await self.execution_gateway.start()
+            logger.info("✅ ExecutionGateway started (centralized order routing active)")
         
         # Start maker executor monitoring
         if self.maker_executor and ENABLE_POST_ONLY_ORDERS:
@@ -548,7 +643,16 @@ class PolymarketBot:
         logger.info("Shutting down bot...")
         
         try:
-            # Shutdown WebSocket manager first (stop receiving new data)
+            # AUDIT FIX: Stop RiskController monitoring first
+            if hasattr(self, 'risk_controller') and self.risk_controller:
+                logger.info("Stopping RiskController monitoring...")
+                try:
+                    await self.risk_controller.stop_monitoring()
+                    logger.info("✅ RiskController stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping RiskController: {e}")
+            
+            # Shutdown WebSocket manager (stop receiving new data)
             if hasattr(self, 'market_data_manager') and self.market_data_manager:
                 logger.info("Shutting down WebSocket manager...")
                 try:
@@ -601,6 +705,12 @@ class PolymarketBot:
             if self.maker_executor:
                 logger.info("Stopping maker executor monitoring...")
                 await self.maker_executor.stop_monitoring()
+            
+            # FIX 4: Stop ExecutionGateway (halt all order routing)
+            if self.execution_gateway:
+                logger.info("Stopping ExecutionGateway...")
+                await self.execution_gateway.stop()
+                logger.info("✅ ExecutionGateway stopped")
             
             # Phase 1: Cancel all remaining open orders (graceful exit)
             try:
@@ -2692,6 +2802,11 @@ class PolymarketBot:
                         f"ALL TRADING STOPPED"
                     )
                     self.global_kill_switch = True
+                    
+                    # FIX 4: ATOMIC CANCELLATION - Halt ExecutionGateway BEFORE cancelling orders
+                    if self.execution_gateway:
+                        logger.critical("[KILL_SWITCH] Halting ExecutionGateway (no new orders)")
+                        await self.execution_gateway.stop()
                     
                     # Stop all strategies
                     for strategy in self.strategies:

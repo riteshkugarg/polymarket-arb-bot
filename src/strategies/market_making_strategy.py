@@ -288,13 +288,34 @@ class MarketMakingStrategy(BaseStrategy):
         client: PolymarketClient,
         order_manager: OrderManager,
         market_data_manager: Optional[MarketDataManager] = None,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        execution_gateway: Optional[Any] = None,  # CRITICAL FIX #1: Centralized routing
+        inventory_manager: Optional[Any] = None,  # AUDIT FIX: Unified position tracking
+        risk_controller: Optional[Any] = None  # AUDIT FIX: Circuit breaker authority
     ):
-        """Initialize market making strategy"""
+        """
+        Initialize market making strategy
+        
+        Args:
+            client: Polymarket CLOB client
+            order_manager: Order execution manager
+            market_data_manager: WebSocket market data manager
+            config: Optional configuration overrides
+            execution_gateway: Centralized order routing with STP
+            inventory_manager: Unified inventory tracking authority
+            risk_controller: Risk management and circuit breaker
+        """
         super().__init__(client, order_manager, config)
         
         # Market data manager for real-time WebSocket data
         self._market_data_manager = market_data_manager
+        
+        # Execution gateway for centralized routing
+        self._execution_gateway = execution_gateway
+        
+        # Risk management (AUDIT FIX)
+        self._inventory_manager = inventory_manager
+        self._risk_controller = risk_controller
         
         # Budget tracking
         self._allocated_capital = Decimal(str(MARKET_MAKING_STRATEGY_CAPITAL))
@@ -339,6 +360,10 @@ class MarketMakingStrategy(BaseStrategy):
         self._inventory_defense_mode: Dict[str, float] = {}  # market_id -> end_time
         self._defense_mode_duration = 60  # Stay in defense mode for 60 seconds
         
+        # CRITICAL FIX #1: Arb execution pause (prevents inventory race condition)
+        self._arb_paused_markets: set = set()  # Markets paused during arb execution
+        self._arb_pause_expiry: Dict[str, float] = {}  # Auto-resume after timeout
+        
         logger.info(
             f"MarketMakingStrategy initialized - "
             f"Capital: ${self._allocated_capital}, "
@@ -364,6 +389,56 @@ class MarketMakingStrategy(BaseStrategy):
                 self.on_websocket_disconnection
             )
             logger.info("✅ Registered disconnection handler for Flash Cancel")
+    
+    async def pause_for_arb(self, market_id: str) -> None:
+        """
+        CRITICAL FIX #1: Pause MM quoting during arb execution
+        
+        Prevents race condition where:
+        1. Arb calculates profit assuming static inventory
+        2. MM places new order during arb execution
+        3. Inventory changes → arb profit calculation invalid
+        4. Potential self-trade (arb hits our MM quote)
+        
+        Duration: 500-1000ms (typical arb execution time)
+        """
+        self._arb_paused_markets.add(market_id)
+        self._arb_pause_expiry[market_id] = time.time() + 1.5  # 1.5s timeout
+        logger.debug(
+            f"[MM_PAUSE] ⏸️  Paused quoting on {market_id[:8]}... "
+            f"(arb execution in progress, prevents inventory race)"
+        )
+    
+    async def resume_from_arb(self, market_id: str) -> None:
+        """
+        Resume MM quoting after arb execution completes
+        """
+        self._arb_paused_markets.discard(market_id)
+        self._arb_pause_expiry.pop(market_id, None)
+        logger.debug(
+            f"[MM_RESUME] ▶️  Resumed quoting on {market_id[:8]}... "
+            f"(arb execution complete)"
+        )
+    
+    def _is_arb_paused(self, market_id: str) -> bool:
+        """
+        Check if market is paused for arb execution (with timeout)
+        """
+        if market_id not in self._arb_paused_markets:
+            return False
+        
+        # Auto-expire if timeout exceeded
+        expiry = self._arb_pause_expiry.get(market_id, 0)
+        if time.time() > expiry:
+            logger.warning(
+                f"[MM_PAUSE_TIMEOUT] Auto-resuming {market_id[:8]}... "
+                f"(arb pause exceeded 1.5s timeout)"
+            )
+            self._arb_paused_markets.discard(market_id)
+            self._arb_pause_expiry.pop(market_id, None)
+            return False
+        
+        return True
     
     async def handle_fill_event(self, fill: FillEvent) -> None:
         """

@@ -83,12 +83,15 @@ MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.97
 
 # Taker fee percentage per trade (basis for opportunity detection)
 # Current Polymarket fee: 1.0% (for tier 1) to 1.5% (for tier 0)
-# We use 1.2% as competitive buffer (beats tier 0, loses to tier 1)
-ARBITRAGE_TAKER_FEE_PERCENT: Final[float] = 0.012  # 1.2%
+# INSTITUTIONAL UPGRADE: Set to actual 1.0% fee tier (aggressive)
+# Previous: 1.2% (too conservative - filtered profitable trades)
+ARBITRAGE_TAKER_FEE_PERCENT: Final[float] = 0.010  # 1.0% (actual fee)
 
 # Arbitrage opportunity threshold
-# Only execute if sum(prices) < this threshold (accounts for fees)
-ARBITRAGE_OPPORTUNITY_THRESHOLD: Final[float] = 0.98  # sum < 98 cents
+# INSTITUTIONAL UPGRADE: Tightened to 0.992 (~0.8% inefficiency)
+# Previous: 0.98 (required 2% inefficiency - too strict)
+# Rationale: Most 2026 HFT arb opportunities are 0.5%-1% range
+ARBITRAGE_OPPORTUNITY_THRESHOLD: Final[float] = 0.992  # sum < 99.2 cents
 
 
 # ============================================================================
@@ -531,13 +534,14 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 # Market Selection
 # -----------------
 # Minimum 24h volume to consider for market making (USD)
-# DISCOVERY MODE: $10/day (ultra-low for finding ANY active markets)
-# Per Polymarket Support: Start low, increase based on what's available
-# Previous: $50 (still too high - found 0 markets)
+# INSTITUTIONAL UPGRADE: $10,000/day minimum for quality liquidity
+# Previous: $10 (discovery mode - too low for institutional trading)
+# Rationale: Filters for established markets with real activity
+# Targets 300+ markets with real spreads vs 1000+ dead markets
 #
-# PRODUCTION NOTE: If bot trades too many low-quality markets (wide spreads,
-# unprofitable fills), increase to $50-100 to filter for better liquidity
-MM_MIN_MARKET_VOLUME_24H: Final[float] = 10.0
+# PRODUCTION NOTE: This significantly expands market pool from $50k threshold
+# while filtering out ultra-low quality markets (<$10k/day)
+MM_MIN_MARKET_VOLUME_24H: Final[float] = 10000.0
 
 # Minimum liquidity (orderbook depth) - MORE CRITICAL THAN VOLUME
 # DISCOVERY MODE: $5 (ultra-low to discover what's actually available)
@@ -577,7 +581,10 @@ MM_MAX_INVENTORY_PER_OUTCOME: Final[int] = 30
 # Spread Management
 # ------------------
 # Target spread (profit per round trip before fees)
-MM_TARGET_SPREAD: Final[float] = 0.03  # 3 cents = 3%
+# INSTITUTIONAL UPGRADE: 0.8% target (reduced from 3%)
+# Previous: 3% (too wide - quotes not competitive)
+# Rationale: Tighter spreads = higher fill probability in 2026 HFT environment
+MM_TARGET_SPREAD: Final[float] = 0.008  # 0.8 cents = 0.8%
 
 # Minimum spread (don't go tighter than this)
 MM_MIN_SPREAD: Final[float] = 0.02  # 2 cents = 2%

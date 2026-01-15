@@ -72,20 +72,23 @@ logger = get_logger(__name__)
 
 
 # Constants for arbitrage logic
-# COMPETITIVE BUFFER: 1.2% (allows competing with 1% fee tier traders)
-# Previous: 1.5% (too conservative - missed opportunities to competitors)
+# INSTITUTIONAL UPGRADE: 1.0% actual fee (not 1.2% conservative buffer)
+# Previous: 1.2% (too conservative - missed profitable opportunities)
+# Rationale: Use actual fee tier for accurate profit calculations
 TAKER_FEE_PERCENT = ARBITRAGE_TAKER_FEE_PERCENT  # Import from constants for flexibility
-ARBITRAGE_OPPORTUNITY_THRESHOLD = 0.98  # sum(prices) < 0.98
+ARBITRAGE_OPPORTUNITY_THRESHOLD = 0.992  # UPGRADED: sum(prices) < 0.992 (~0.8% inefficiency)
 TAKER_FEE_BUFFER = TAKER_FEE_PERCENT  # Account for fee in opportunity detection
-FINAL_THRESHOLD = ARBITRAGE_OPPORTUNITY_THRESHOLD  # sum < 0.98 after fee buffer
+FINAL_THRESHOLD = ARBITRAGE_OPPORTUNITY_THRESHOLD  # sum < 0.992 after fee buffer
 
 # SMART SLIPPAGE: Dynamic based on order book depth (replaces flat $0.005)
 # Thin books (< 20 shares) = tight slippage to avoid impact
 # Medium books (20-100 shares) = moderate slippage
 # Deep books (> 100 shares) = looser slippage
+# INSTITUTIONAL UPGRADE: Increased loose slippage from 0.010 to 0.015
+# Rationale: Allows fills in fast-moving arbitrage baskets with deep liquidity
 SLIPPAGE_TIGHT = 0.002  # $0.002 for thin books
 SLIPPAGE_MODERATE = 0.005  # $0.005 for medium books (legacy default)
-SLIPPAGE_LOOSE = 0.010  # $0.010 for deep books
+SLIPPAGE_LOOSE = 0.015  # $0.015 for deep books (UPGRADED from 0.010)
 DEPTH_THRESHOLD_THIN = 20  # shares
 DEPTH_THRESHOLD_MEDIUM = 100  # shares
 
