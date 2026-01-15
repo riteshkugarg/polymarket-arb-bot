@@ -1568,6 +1568,15 @@ class MarketMakingStrategy(BaseStrategy):
         - Validate minimum_tick_size and minimum_order_size
         - Require actual volume data (skip markets with null volume)
         """
+        # DEBUG: Log first market to see actual API structure
+        if not hasattr(self, '_debug_logged_first_market'):
+            self._debug_logged_first_market = True
+            logger.info(f"🔍 DEBUG FIRST MARKET: {market.get('question', 'N/A')[:50]}")
+            logger.info(f"🔍 Available fields: {sorted(market.keys())}")
+            logger.info(f"🔍 volumeNum={market.get('volumeNum')}, volume24hr={market.get('volume24hr')}, volume={market.get('volume')}")
+            logger.info(f"🔍 liquidityNum={market.get('liquidityNum')}, liquidity={market.get('liquidity')}")
+            logger.info(f"🔍 enableOrderBook={market.get('enableOrderBook')}, active={market.get('active')}, closed={market.get('closed')}")
+        
         # Binary market check
         tokens = market.get('tokens', [])
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
