@@ -141,6 +141,38 @@ class ArbitrageOpportunity:
     # Dynamic fee rates (2026 update)
     fee_rates_bps: Optional[Dict[str, int]] = None  # token_id -> fee in basis points
     total_fee_amount: float = 0.0  # Total fee in dollars
+    
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # P2 FIX: LATENCY BUDGET TRACKING (2026 Production)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # Track opportunity age to discard stale opportunities before execution
+    # In HFT environment, 500ms+ latency makes opportunities unprofitable
+    # This prevents executing on stale prices and taking adverse fills
+    # ═══════════════════════════════════════════════════════════════════════════════
+    discovery_timestamp: float = 0.0  # Will be set on creation
+    max_age_ms: float = 500.0  # 500ms latency budget
+    
+    def __post_init__(self):
+        """Set discovery timestamp after initialization"""
+        if self.discovery_timestamp == 0.0:
+            self.discovery_timestamp = time.time()
+    
+    def get_age_ms(self) -> float:
+        """Get opportunity age in milliseconds"""
+        return (time.time() - self.discovery_timestamp) * 1000
+    
+    def is_stale(self) -> bool:
+        """P2 FIX: Check if opportunity has exceeded latency budget
+        
+        In HFT environment, opportunities stale quickly due to:
+        - Other traders taking liquidity
+        - Market prices moving
+        - Book depth changes
+        
+        Returns:
+            True if opportunity age exceeds max_age_ms threshold
+        """
+        return self.get_age_ms() > self.max_age_ms
 
 
 @dataclass

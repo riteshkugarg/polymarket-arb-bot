@@ -280,13 +280,31 @@ class PolymarketBot:
             logger.info("="*80)
             
             # ========================================================================
-            # LAYER 1: RISK MANAGEMENT (HIGHEST PRIORITY)
+            # LAYER 1: CLIENT INITIALIZATION (REQUIRED FIRST)
             # ========================================================================
-            logger.info("\n[LAYER 1] Risk Management System")
+            logger.info("\n[LAYER 1] Client Infrastructure")
+            
+            # Initialize Polymarket client FIRST (needed for balance check)
+            self.client = PolymarketClient()
+            await self.client.initialize()
+            
+            # [SAFETY] FIX 2: Explicit Nonce Sync on Startup
+            # Prevent INVALID_NONCE errors from bot/server desync
+            await self.sync_header_nonce()
+            
+            logger.info("✅ PolymarketClient initialized")
+            
+            # ========================================================================
+            # LAYER 2: RISK MANAGEMENT (WITH BALANCE CHECK)
+            # ========================================================================
+            logger.info("\n[LAYER 2] Risk Management System")
+            
+            # Fetch current balance from client
+            current_balance = float(await self.client.get_balance())
+            self.current_balance = current_balance
             
             # INSTITUTIONAL CAPITAL ALLOCATION: Use dynamic percentage-based allocation
             from config.capital_allocator import calculate_strategy_capital
-            current_balance = float(self.balance)
             allocations = calculate_strategy_capital(current_balance)
             
             total_capital = allocations['market_making'] + allocations['arbitrage']
@@ -310,9 +328,9 @@ class PolymarketBot:
             logger.info(f"    Capital: ${total_capital:,.2f}, Max Drawdown: 2%, Kill Switch: ARMED")
             
             # ========================================================================
-            # LAYER 2: INVENTORY MANAGEMENT (CAPITAL AUTHORITY)
+            # LAYER 3: INVENTORY MANAGEMENT (CAPITAL AUTHORITY)
             # ========================================================================
-            logger.info("\n[LAYER 2] Inventory Management System")
+            logger.info("\n[LAYER 3] Inventory Management System")
             
             self.inventory_manager = InventoryManager(
                 max_position_per_market=Decimal('5000'),  # $5k per market
@@ -324,17 +342,9 @@ class PolymarketBot:
             logger.info(f"    Max per market: $5,000, Max total: $50,000, Gamma: 0.2")
             
             # ========================================================================
-            # LAYER 3: CLIENT & ORDER INFRASTRUCTURE
+            # LAYER 4: ORDER INFRASTRUCTURE
             # ========================================================================
-            logger.info("\n[LAYER 3] Client Infrastructure")
-            
-            # Initialize Polymarket client
-            self.client = PolymarketClient()
-            await self.client.initialize()
-            
-            # [SAFETY] FIX 2: Explicit Nonce Sync on Startup
-            # Prevent INVALID_NONCE errors from bot/server desync
-            await self.sync_header_nonce()
+            logger.info("\n[LAYER 4] Order Infrastructure")
             
             # Initialize order manager
             self.order_manager = OrderManager(self.client)

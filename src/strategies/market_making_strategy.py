@@ -493,6 +493,17 @@ class MarketPosition:
         self.hysteresis_threshold_inventory_pct = 0.10  # 10% of max position
         self.hysteresis_blocks = 0  # Track efficiency gains
         
+        # ═══════════════════════════════════════════════════════════════════
+        # P0 FIX: USDC DUST ACCUMULATION TRACKING (2026 Production)
+        # ═══════════════════════════════════════════════════════════════════
+        # Tracks rounding errors from tick size quantization (6-decimal USDC → 3-decimal ticks)
+        # Without tracking: 500,000 fills × $0.000001 error = $0.50 unaccounted loss
+        # With tracking: Compensates when accumulated dust >= 1 tick ($0.001)
+        # ═══════════════════════════════════════════════════════════════════
+        self._accumulated_dust_bid: Dict[str, Decimal] = {tid: Decimal('0') for tid in token_ids}
+        self._accumulated_dust_ask: Dict[str, Decimal] = {tid: Decimal('0') for tid in token_ids}
+        self._dust_compensation_count = 0  # Track how many compensations applied
+        
     async def should_update_quotes(
         self,
         token_id: str,
@@ -597,17 +608,18 @@ class MarketPosition:
         
         async with self.markout_lock:
             for fill in mature_fills:
-                timestamp, tid, side, fill_price, fill_size = fill
+                # P0 FIX: Add missing micro_price field (was causing ValueError)
+                timestamp, tid, side, fill_price, micro_at_fill, fill_size = fill
                 
-                # Calculate markout PnL
+                # Calculate markout PnL using micro-price at fill time
                 if side == 'BUY':
-                    # Bought at fill_price, current price is current_micro_price
-                    # PnL = (current - fill) * size
-                    markout_pnl = (current_micro_price - fill_price) * fill_size
+                    # Bought at micro_at_fill, current price is current_micro_price
+                    # PnL = (current - fill_micro) * size
+                    markout_pnl = (current_micro_price - micro_at_fill) * fill_size
                 else:  # SELL
-                    # Sold at fill_price, current price is current_micro_price
-                    # PnL = (fill - current) * size
-                    markout_pnl = (fill_price - current_micro_price) * fill_size
+                    # Sold at micro_at_fill, current price is current_micro_price
+                    # PnL = (fill_micro - current) * size
+                    markout_pnl = (micro_at_fill - current_micro_price) * fill_size
                 
                 # Add to markout window
                 self.markout_window.append(markout_pnl)
@@ -1547,6 +1559,66 @@ class MarketMakingStrategy(BaseStrategy):
             
             logger.info(f"Position rehydration complete: {len(self._positions)} markets restored")
             
+            # ═══════════════════════════════════════════════════════════════════
+            # P1 FIX: CHECKSUM VALIDATION (Prevents double-buying)
+            # ═══════════════════════════════════════════════════════════════════
+            # Validate rehydrated positions against exchange balances
+            # If mismatch detected, trigger kill switch to prevent trading errors
+            # This catches race conditions from mid-fill restarts
+            # ═══════════════════════════════════════════════════════════════════
+            try:
+                logger.info("🔍 Validating rehydrated positions against exchange balances...")
+                
+                # Collect all token IDs from rehydrated positions
+                all_token_ids = set()
+                for position in self._positions.values():
+                    all_token_ids.update(position.token_ids)
+                
+                mismatch_count = 0
+                for token_id in all_token_ids:
+                    # Get exchange balance
+                    try:
+                        balance_response = await self.client.get_balance(token_id)
+                        api_balance = float(balance_response) if balance_response else 0.0
+                    except Exception as e:
+                        logger.warning(f"Could not fetch balance for {token_id[:8]}...: {e}")
+                        continue
+                    
+                    # Get local inventory
+                    local_balance = 0.0
+                    for position in self._positions.values():
+                        if token_id in position.inventory:
+                            local_balance += position.inventory[token_id]
+                    
+                    # Check for mismatch (1-share tolerance for rounding)
+                    if abs(api_balance - local_balance) > 1:
+                        mismatch_count += 1
+                        logger.critical(
+                            f"🚨 INVENTORY MISMATCH: {token_id[:8]}... - "
+                            f"API: {api_balance:.0f} shares, Local: {local_balance:.0f} shares, "
+                            f"Delta: {api_balance - local_balance:+.0f}"
+                        )
+                
+                if mismatch_count > 0:
+                    logger.critical(
+                        f"🛑 POSITION CHECKSUM FAILED: {mismatch_count} mismatches detected - "
+                        f"HALTING TRADING until manual reconciliation"
+                    )
+                    
+                    # Trigger kill switch if risk controller available
+                    if self._risk_controller:
+                        await self._risk_controller.trigger_kill_switch(
+                            reason=f"Position checksum failed: {mismatch_count} mismatches"
+                        )
+                else:
+                    logger.info(
+                        f"✅ Position checksum PASSED: All {len(all_token_ids)} tokens validated"
+                    )
+                    
+            except Exception as checksum_error:
+                logger.error(f"Checksum validation error: {checksum_error}", exc_info=True)
+                logger.warning("⚠️ Continuing without checksum validation - proceed with caution")
+            
         except Exception as e:
             logger.error(f"Error rehydrating positions: {e}", exc_info=True)
             # Don't fail startup - continue with empty positions but log warning
@@ -2280,6 +2352,46 @@ class MarketMakingStrategy(BaseStrategy):
                     logger.warning(f"⏸️ Waiting for latency to recover below {LATENCY_RECOVERY_THRESHOLD_MS:.0f}ms...")
                     return
         
+        # ═══════════════════════════════════════════════════════════════════
+        # P0 FIX: RESOLVED MARKET CHECK (Prevents capital lock)
+        # ═══════════════════════════════════════════════════════════════════
+        # Check if market is closed/resolved BEFORE placing orders
+        # Once resolved, CLOB disables trading → orders cannot be cancelled
+        # This prevents capital being locked in un-cancellable orders
+        # ═══════════════════════════════════════════════════════════════════
+        try:
+            is_resolved = await self.client.is_market_closed(market_id)
+            if is_resolved:
+                logger.warning(
+                    f"⚠️ RESOLVED MARKET DETECTED: {market_id[:8]}... - "
+                    f"Cancelling all orders and removing from active positions"
+                )
+                
+                # Cancel any existing orders (while still possible)
+                position = self._positions.get(market_id)
+                if position:
+                    all_order_ids = list(position.active_bids.values()) + list(position.active_asks.values())
+                    for order_id in all_order_ids:
+                        try:
+                            await self.client.cancel_order(order_id)
+                            logger.info(f"Cancelled order {order_id[:8]}... on resolved market")
+                        except Exception as e:
+                            logger.debug(f"Failed to cancel {order_id[:8]}... (may already be cancelled): {e}")
+                    
+                    # Clear tracking
+                    position.active_bids.clear()
+                    position.active_asks.clear()
+                
+                # Remove from active positions
+                if market_id in self._positions:
+                    logger.info(f"Removing resolved market {market_id[:8]}... from active positions")
+                    del self._positions[market_id]
+                
+                return  # Skip quote placement
+        except Exception as e:
+            # Don't fail quote placement if resolution check fails
+            logger.debug(f"Resolution check failed for {market_id[:8]}...: {e}")
+        
         # CRITICAL: Check if in INVENTORY DEFENSE MODE
         # If fast market prevented quoting, stop trying and focus on unwinding
         if market_id in self._inventory_defense_mode:
@@ -2298,6 +2410,42 @@ class MarketMakingStrategy(BaseStrategy):
                         pass
                 position.active_bids.clear()
                 position.active_asks.clear()
+                
+                # ═══════════════════════════════════════════════════════════════════
+                # P1 FIX: FORCED UNWINDING (Emergency Exit)
+                # ═══════════════════════════════════════════════════════════════════
+                # If inventory exceeds 50% of max position, aggressively exit via IOC
+                # This prevents inventory from going stale during fast markets
+                # Unwind 30% per attempt to avoid market impact
+                # ═══════════════════════════════════════════════════════════════════
+                for token_id, inventory in position.inventory.items():
+                    abs_inventory = abs(inventory)
+                    if abs_inventory > MM_MAX_INVENTORY_PER_OUTCOME * 0.5:  # >50% max
+                        # Place aggressive IOC order to exit
+                        side = 'SELL' if inventory > 0 else 'BUY'
+                        exit_size = abs_inventory * 0.3  # Unwind 30% per attempt
+                        
+                        try:
+                            logger.warning(
+                                f"🚨 DEFENSE MODE FORCED EXIT: {side} {exit_size:.0f} shares "
+                                f"of {token_id[:8]}... via IOC @ market (inventory: {inventory})"
+                            )
+                            
+                            await self.order_manager.execute_market_order(
+                                token_id=token_id,
+                                side=side,
+                                size=exit_size,
+                                is_shares=True
+                            )
+                            
+                            logger.info(
+                                f"✅ Defense mode exit successful: {side} {exit_size:.0f} shares"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"❌ Defense mode exit failed for {token_id[:8]}...: {e}"
+                            )
+                
                 return
             else:
                 # Defense mode expired - resume normal quoting
@@ -2583,9 +2731,60 @@ class MarketMakingStrategy(BaseStrategy):
                 # - If price = $0.50: max_shares = $11.38 / $0.50 = 22.76 shares
                 # - If price = $0.05: max_shares = $11.38 / $0.05 = 227.6 shares
                 
+                # ═══════════════════════════════════════════════════════════════════
+                # P0 FIX: DUST COMPENSATION (USDC Precision Guard)
+                # ═══════════════════════════════════════════════════════════════════
+                # Apply accumulated dust compensation before rounding
+                # This prevents 0.000001 rounding errors from compounding to $0.50 losses
+                # ═══════════════════════════════════════════════════════════════════
+                
                 # Position sizing (convert Decimal to float for arithmetic)
                 target_bid_float = float(target_bid)
                 target_ask_float = float(target_ask)
+                
+                # Get accumulated dust for this token
+                dust_bid = position._accumulated_dust_bid.get(token_id, Decimal('0'))
+                dust_ask = position._accumulated_dust_ask.get(token_id, Decimal('0'))
+                
+                # Round prices with dust tracking
+                target_bid_rounded, new_dust_bid = self._round_price_to_tick(
+                    target_bid_float, 'BUY'
+                )
+                target_ask_rounded, new_dust_ask = self._round_price_to_tick(
+                    target_ask_float, 'SELL'
+                )
+                
+                # Update accumulated dust
+                position._accumulated_dust_bid[token_id] = dust_bid + new_dust_bid
+                position._accumulated_dust_ask[token_id] = dust_ask + new_dust_ask
+                
+                # Compensate when dust >= 1 tick ($0.001)
+                tick_size = Decimal('0.001')
+                if abs(position._accumulated_dust_bid[token_id]) >= tick_size:
+                    compensation = (position._accumulated_dust_bid[token_id] // tick_size) * tick_size
+                    target_bid_rounded += float(compensation)
+                    position._accumulated_dust_bid[token_id] -= compensation
+                    position._dust_compensation_count += 1
+                    
+                    logger.debug(
+                        f"💰 DUST COMPENSATION (BID): Adjusted by ${float(compensation):+.4f} "
+                        f"(count: {position._dust_compensation_count})"
+                    )
+                
+                if abs(position._accumulated_dust_ask[token_id]) >= tick_size:
+                    compensation = (position._accumulated_dust_ask[token_id] // tick_size) * tick_size
+                    target_ask_rounded += float(compensation)
+                    position._accumulated_dust_ask[token_id] -= compensation
+                    position._dust_compensation_count += 1
+                    
+                    logger.debug(
+                        f"💰 DUST COMPENSATION (ASK): Adjusted by ${float(compensation):+.4f} "
+                        f"(count: {position._dust_compensation_count})"
+                    )
+                
+                # Use compensated rounded prices
+                target_bid_float = target_bid_rounded
+                target_ask_float = target_ask_rounded
                 
                 # Calculate dynamic position size
                 capital_per_market = float(self._allocated_capital) / max(MM_MAX_MARKETS, 1)
@@ -2673,19 +2872,70 @@ class MarketMakingStrategy(BaseStrategy):
         micro_price = ((bid_vol * best_ask) + (ask_vol * best_bid)) / total_vol
         return micro_price
     
-    def _round_price_to_tick(self, price: float, side: str, tick_size: float = 0.001) -> float:
-        """Strict rounding: floor for bids, ceil for asks (never cross spread)"""
+    def _round_price_to_tick(self, price: float, side: str, tick_size: float = 0.001) -> Tuple[float, Decimal]:
+        """Strict rounding with dust tracking: floor for bids, ceil for asks (never cross spread)
+        
+        P0 FIX: Now returns (rounded_price, dust_delta) to enable accumulation tracking
+        """
         import math
+        from decimal import Decimal
+        
+        exact_price = Decimal(str(price))
+        tick = Decimal(str(tick_size))
         
         if side == 'BUY':
             # Floor: Always round DOWN for bids (stay below mid)
-            rounded = math.floor(price / tick_size) * tick_size
+            rounded = (exact_price // tick) * tick
         else:
             # Ceil: Always round UP for asks (stay above mid)
-            rounded = math.ceil(price / tick_size) * tick_size
+            rounded = ((exact_price // tick) + Decimal('1')) * tick
+        
+        # Calculate dust (error from rounding)
+        dust = exact_price - rounded
         
         # Clamp to valid range
-        return max(0.001, min(0.999, rounded))
+        rounded = max(Decimal('0.001'), min(Decimal('0.999'), rounded))
+        
+        return float(rounded), dust
+    
+    def _validate_binary_sum(self, token_id_yes: str, bid_yes: float, ask_yes: float,
+                             token_id_no: str, bid_no: float, ask_no: float) -> bool:
+        """P2 FIX: Validate binary market sum constraint (Yes + No ≈ $1.00)
+        
+        For binary markets, arbitrage ensures: P(Yes) + P(No) = 1.00
+        If this constraint is violated, either:
+        1. Stale data (WebSocket lag)
+        2. Arbitrage opportunity (rare)
+        3. Market microstructure issue
+        
+        Args:
+            token_id_yes: Yes token ID (for logging)
+            bid_yes: Yes bid price
+            ask_yes: Yes ask price
+            token_id_no: No token ID (for logging)
+            bid_no: No bid price
+            ask_no: No ask price
+            
+        Returns:
+            True if constraint satisfied (within 5-cent tolerance), False otherwise
+        """
+        mid_yes = (bid_yes + ask_yes) / 2.0
+        mid_no = (bid_no + ask_no) / 2.0
+        total = mid_yes + mid_no
+        
+        TOLERANCE = 0.05  # 5-cent tolerance (allows for spread + small arb)
+        
+        if abs(total - 1.0) > TOLERANCE:
+            logger.warning(
+                f"⚠️ BINARY SUM CONSTRAINT VIOLATION:\n"
+                f"   Yes ({token_id_yes[:8]}...): mid=${mid_yes:.4f} (bid=${bid_yes:.4f}, ask=${ask_yes:.4f})\n"
+                f"   No ({token_id_no[:8]}...): mid=${mid_no:.4f} (bid=${bid_no:.4f}, ask=${ask_no:.4f})\n"
+                f"   SUM: ${total:.4f} (expected: $1.00, delta: ${total - 1.0:+.4f})\n"
+                f"   Possible causes: Stale data, arbitrage opportunity, or market issue"
+            )
+            return False
+        
+        return True
     
     def _calculate_skewed_quotes(self, mid_price: float, inventory: int, is_toxic: bool = False, 
                                  position: Optional[MarketPosition] = None, 
@@ -2775,14 +3025,19 @@ class MarketMakingStrategy(BaseStrategy):
         
         mid_price_dec = Decimal(str(mid_price))
         
-        # Apply Bernoulli boundary protection
+        # P1 FIX: Apply Bernoulli boundary protection WITH FLOOR
+        MIN_EFFECTIVE_RISK = Decimal('0.0001')  # 1 basis point minimum (prevents collapse)
+        
         if mid_price_dec < BOUNDARY_LOW or mid_price_dec > BOUNDARY_HIGH:
             # Near boundaries: Bernoulli variance p(1-p) → 0, causing excessive skew
             # Cap the effective risk factor to prevent "gamma overload"
-            effective_risk = RISK_FACTOR * MAX_BOUNDARY_VOLATILITY / Decimal('0.15')
+            calculated_risk = RISK_FACTOR * MAX_BOUNDARY_VOLATILITY / Decimal('0.15')
+            effective_risk = max(calculated_risk, MIN_EFFECTIVE_RISK)  # Floor protection
+            
             logger.warning(
                 f"🛡️ BERNOULLI GUARD: Price ${mid_price:.4f} near boundary - "
-                f"Capping risk factor {RISK_FACTOR:.6f} → {effective_risk:.6f}"
+                f"Risk factor {RISK_FACTOR:.6f} → {effective_risk:.6f} "
+                f"(calculated: {calculated_risk:.6f}, floor: {MIN_EFFECTIVE_RISK:.6f})"
             )
         else:
             effective_risk = RISK_FACTOR

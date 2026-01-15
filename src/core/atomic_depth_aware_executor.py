@@ -381,6 +381,12 @@ class AtomicDepthAwareExecutor:
         Critical safety check: If ANY outcome lacks depth, returns failure
         without proceeding to order placement.
         
+        P2 FIX: Added 20% safety buffer to account for book staleness
+        WebSocket book snapshots can be 50-200ms stale, during which:
+        - Other traders may take liquidity
+        - Prices may move
+        - Depth may decrease
+        
         Args:
             outcomes: List of (token_id, outcome_name, ask_price) tuples
             required_size: Minimum shares needed per outcome
@@ -389,7 +395,14 @@ class AtomicDepthAwareExecutor:
             DepthCheckResult with validation outcome
         """
         try:
-            logger.debug(f"Checking depth for {len(outcomes)} outcomes (min {required_size} shares)...")
+            # P2 FIX: Apply safety buffer (20%) to required size
+            DEPTH_SAFETY_BUFFER = 1.2  # Require 20% extra depth
+            required_size_with_buffer = required_size * DEPTH_SAFETY_BUFFER
+            
+            logger.debug(
+                f"Checking depth for {len(outcomes)} outcomes "
+                f"(min {required_size:.1f} shares, with buffer: {required_size_with_buffer:.1f})"
+            )
             
             for token_id, outcome_name, _ in outcomes:
                 try:
@@ -418,20 +431,22 @@ class AtomicDepthAwareExecutor:
                         else:
                             break
                     
-                    # Depth check
-                    if available_at_ask < required_size:
+                    # Depth check (P2 FIX: Compare against buffered size)
+                    if available_at_ask < required_size_with_buffer:
                         return DepthCheckResult(
                             is_valid=False,
                             token_id=token_id,
                             available_depth=available_at_ask,
                             error_message=(
                                 f"Insufficient depth for {outcome_name}: "
-                                f"{available_at_ask:.1f} < {required_size:.1f} shares"
+                                f"{available_at_ask:.1f} < {required_size_with_buffer:.1f} shares "
+                                f"(required: {required_size:.1f} + 20% safety buffer)"
                             )
                         )
                     
                     logger.debug(
-                        f"  ✅ {outcome_name}: {available_at_ask:.1f} shares at ${best_ask:.4f}"
+                        f"  ✅ {outcome_name}: {available_at_ask:.1f} shares at ${best_ask:.4f} "
+                        f"(exceeds {required_size_with_buffer:.1f} buffered requirement)"
                     )
                     
                 except Exception as e:

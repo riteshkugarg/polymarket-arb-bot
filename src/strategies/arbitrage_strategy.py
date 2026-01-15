@@ -600,6 +600,24 @@ class ArbitrageStrategy(BaseStrategy):
             # Execute top opportunity
             top_opportunity = executable_opps[0]
             
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # P2 FIX: LATENCY BUDGET CHECK (Discard stale opportunities)
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # Check if opportunity has exceeded 500ms latency budget
+            # Stale opportunities are unprofitable due to:
+            # - Other traders taking liquidity
+            # - Market prices moving against us
+            # - Book depth changes
+            # ═══════════════════════════════════════════════════════════════════════════════
+            if top_opportunity.is_stale():
+                age_ms = top_opportunity.get_age_ms()
+                logger.warning(
+                    f"⏰ STALE OPPORTUNITY DISCARDED: {top_opportunity.market_id[:8]}... - "
+                    f"Age: {age_ms:.0f}ms > {top_opportunity.max_age_ms:.0f}ms budget - "
+                    f"Skipping execution (prices likely moved)"
+                )
+                return
+            
             # Check execution cooldown
             time_since_last = datetime.now().timestamp() - self._last_execution_time
             if time_since_last < ARB_EXECUTION_COOLDOWN_SEC:
