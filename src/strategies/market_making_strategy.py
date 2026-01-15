@@ -475,6 +475,96 @@ class MarketPosition:
         self.consecutive_positive_markouts = 0  # Reset counter
         self.markout_lock = asyncio.Lock()  # Thread-safe updates
         
+        # ═══════════════════════════════════════════════════════════════════
+        # MODULE 2: SKEW HYSTERESIS (Efficiency Guard)
+        # ═══════════════════════════════════════════════════════════════════
+        # Prevents wasteful cancel/replace cycles on minor inventory changes
+        # Only updates quotes if:
+        #   - Reservation price changed by > $0.002 (20% of tick)
+        #   - OR inventory changed by > 10% of max position size
+        # Emergency exits bypass hysteresis
+        # ═══════════════════════════════════════════════════════════════════
+        self.last_applied_reservation_price: Dict[str, float] = {tid: 0.0 for tid in token_ids}
+        self.last_inventory_snapshot: Dict[str, int] = {tid: 0 for tid in token_ids}
+        self.hysteresis_lock = asyncio.Lock()
+        self.hysteresis_threshold_price = 0.002  # $0.002 = 20% of 0.01 tick
+        self.hysteresis_threshold_inventory_pct = 0.10  # 10% of max position
+        self.hysteresis_blocks = 0  # Track efficiency gains
+        
+    async def should_update_quotes(
+        self,
+        token_id: str,
+        new_reservation_price: float,
+        current_inventory: int,
+        max_position_size: float,
+        is_emergency: bool = False
+    ) -> bool:
+        """MODULE 2: Skew Hysteresis - Check if quote update is necessary
+        
+        Prevents API waste by blocking updates when changes are minor.
+        
+        Args:
+            token_id: Token being quoted
+            new_reservation_price: Newly calculated reservation price
+            current_inventory: Current inventory for this token
+            max_position_size: Maximum position size constant
+            is_emergency: If True, bypass hysteresis (for risk-based exits)
+            
+        Returns:
+            True if quotes should be updated, False if blocked by hysteresis
+        """
+        # Emergency exits always bypass hysteresis
+        if is_emergency:
+            return True
+        
+        async with self.hysteresis_lock:
+            last_res_price = self.last_applied_reservation_price.get(token_id, 0.0)
+            last_inventory = self.last_inventory_snapshot.get(token_id, 0)
+            
+            # First time quoting this token - always update
+            if last_res_price == 0.0:
+                self.last_applied_reservation_price[token_id] = new_reservation_price
+                self.last_inventory_snapshot[token_id] = current_inventory
+                return True
+            
+            # Check price deviation
+            price_delta = abs(new_reservation_price - last_res_price)
+            price_threshold_exceeded = price_delta > self.hysteresis_threshold_price
+            
+            # Check inventory deviation (as % of max position)
+            inventory_delta = abs(current_inventory - last_inventory)
+            inventory_pct_change = inventory_delta / max_position_size if max_position_size > 0 else 0
+            inventory_threshold_exceeded = inventory_pct_change > self.hysteresis_threshold_inventory_pct
+            
+            # Update if either threshold exceeded
+            if price_threshold_exceeded or inventory_threshold_exceeded:
+                # Update snapshot
+                self.last_applied_reservation_price[token_id] = new_reservation_price
+                self.last_inventory_snapshot[token_id] = current_inventory
+                
+                logger.debug(
+                    f"[HYSTERESIS] Quote update ALLOWED for {token_id[:8]}... - "
+                    f"Price Δ: ${price_delta:.4f} {'✅' if price_threshold_exceeded else '❌'}, "
+                    f"Inv Δ: {inventory_pct_change*100:.1f}% {'✅' if inventory_threshold_exceeded else '❌'}"
+                )
+                
+                return True
+            else:
+                # Block update - changes too small
+                self.hysteresis_blocks += 1
+                
+                # Log every 10th block to track efficiency
+                if self.hysteresis_blocks % 10 == 0:
+                    logger.info(
+                        f"[INSTITUTIONAL_GUARD] SKEW HYSTERESIS EFFICIENCY - "
+                        f"Blocked {self.hysteresis_blocks} unnecessary quote updates. "
+                        f"Token: {token_id[:8]}..., Price Δ: ${price_delta:.4f} < ${self.hysteresis_threshold_price:.4f}, "
+                        f"Inv Δ: {inventory_pct_change*100:.1f}% < {self.hysteresis_threshold_inventory_pct*100:.0f}%. "
+                        f"Saving API rate limits and reducing latency."
+                    )
+                
+                return False
+        
     async def calculate_markout_pnl(
         self,
         current_micro_price: float,
@@ -2036,6 +2126,27 @@ class MarketMakingStrategy(BaseStrategy):
                     bid_size *= 0.5
                 elif inventory < 0:
                     ask_size *= 0.5
+                
+                # ═══════════════════════════════════════════════════════════════════
+                # MODULE 2: SKEW HYSTERESIS CHECK (Efficiency Guard)
+                # ═══════════════════════════════════════════════════════════════════
+                # Calculate reservation price from quotes (reverse engineer)
+                # Reservation = (bid + ask) / 2
+                calculated_reservation = (target_bid_float + target_ask_float) / 2.0
+                
+                # Check if update is necessary (or if emergency liquidation)
+                is_emergency = position.get_inventory_age() > MM_MAX_INVENTORY_HOLD_TIME
+                should_update = await position.should_update_quotes(
+                    token_id=token_id,
+                    new_reservation_price=calculated_reservation,
+                    current_inventory=inventory,
+                    max_position_size=MM_MAX_INVENTORY_PER_OUTCOME,
+                    is_emergency=is_emergency
+                )
+                
+                if not should_update:
+                    # Hysteresis blocked this update - skip to save API calls
+                    continue
                 
                 # CRITICAL: Atomic dual-sided placement (prevents legging out)
                 # Place bid and ask simultaneously using asyncio.gather
