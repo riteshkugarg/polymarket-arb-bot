@@ -314,15 +314,16 @@ ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
 HEARTBEAT_INTERVAL_SEC: Final[int] = 300  # 5 minutes
 
 # Maximum allowed drawdown before emergency kill switch (USD)
-# INSTITUTIONAL HFT STANDARD: 2% of total equity
-# Current setting: $100 (adjust to 2% of your actual bankroll)
+# INSTITUTIONAL HFT STANDARD: 5% of total equity for small accounts
+# Current setting: $5.00 (5% of $100 principal)
 # Rationale:
 #   - Prevents catastrophic loss from market microstructure breakdown
 #   - Triggers immediate halt of all strategies (cancel orders, close positions)
 #   - Institutional standard: 2-5% daily drawdown limit
 #   - Formula: If (peak_equity - current_equity) > DRAWDOWN_LIMIT → KILL_SWITCH
-# Note: For $5,000 bankroll, set to $100 (2%). For $100 bankroll, set to $2
-DRAWDOWN_LIMIT_USD: Final[float] = 100.0  # 2% of $5,000 institutional capital
+#   - For small accounts (<$1k), use 5% for earlier intervention
+# Note: For $100 bankroll, 5% = $5. For $5,000 bankroll, 2% = $100
+DRAWDOWN_LIMIT_USD: Final[float] = 5.0  # 5% of $100 principal
 
 # Auto-redeem check interval - how often to check for resolved markets
 AUTO_REDEEM_INTERVAL_SEC: Final[int] = 600  # 10 minutes
@@ -454,14 +455,15 @@ BATCH_RESYNC_WAIT: Final[int] = 15
 # ============================================================================
 
 # Maximum total exposure in USDC (principal protection)
-# INSTITUTIONAL HFT STANDARD: Scale to actual bankroll
-# Current setting: $5,000 (adjust to your actual capital allocation)
+# INSTITUTIONAL HFT STANDARD: 90-95% utilization of available capital
+# Current setting: $95.00 (95% of $100 principal)
 # Rationale:
 #   - Prevents over-leveraging across all strategies
-#   - Maintains 10-20% cash buffer for margin calls / unexpected fills
+#   - Maintains 5% cash buffer for gas fees and unexpected fills
 #   - Institutional standard: 80-90% utilization max
-# Note: Update this value to match your actual trading capital
-MAX_TOTAL_EXPOSURE: Final[float] = 5000.0
+#   - Leaves buffer for emergency exits without liquidation
+# Note: Update this value to match your actual trading capital (95% of bankroll)
+MAX_TOTAL_EXPOSURE: Final[float] = 95.0
 
 # NegRisk Adapter contract address for token conversion
 NEGRISK_ADAPTER_ADDRESS: Final[str] = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
@@ -593,10 +595,18 @@ MM_MAX_ACTIVE_MARKETS: Final[int] = 10
 # Position Sizing
 # ----------------
 # Base position size per market (USD)
-MM_BASE_POSITION_SIZE: Final[float] = 10.0
+# INSTITUTIONAL STANDARD: 5-10% of capital per position
+# Current: $5.00 (5% of $100 principal)
+# Rationale:
+#   - Allows 10-20 simultaneous positions for diversification
+#   - Higher turnover potential = more rebate accumulation
+#   - Reduces single-position concentration risk
+MM_BASE_POSITION_SIZE: Final[float] = 5.0
 
 # Maximum position size per market (USD)
-MM_MAX_POSITION_SIZE: Final[float] = 15.0
+# Institutional standard: 1.5-2x base position size
+# Allows scaling into high-conviction opportunities
+MM_MAX_POSITION_SIZE: Final[float] = 10.0
 
 # Maximum inventory (shares) per outcome per market
 # Prevents accumulating too much directional risk
@@ -628,19 +638,28 @@ MM_INVENTORY_SPREAD_MULTIPLIER: Final[float] = 1.5
 MM_MAX_LOSS_PER_POSITION: Final[float] = 3.0
 
 # Global daily loss limit - circuit breaker (USD)
-MM_GLOBAL_DAILY_LOSS_LIMIT: Final[float] = 50.0
+# INSTITUTIONAL STANDARD: 10-15% of capital per day
+# Current: $10.00 (10% of $100 principal)
+MM_GLOBAL_DAILY_LOSS_LIMIT: Final[float] = 10.0
 
 # Global directional exposure limit - correlation protection (USD)
+# INSTITUTIONAL STANDARD: 70-80% of capital (net portfolio delta)
+# Current: $70.00 (70% of $100 principal)
 # Prevents excessive exposure to correlated markets
-MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE: Final[float] = 100.0
+MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE: Final[float] = 70.0
 
 # External oracle price deviation threshold (percentage)
 MM_ORACLE_PRICE_DEVIATION_LIMIT: Final[float] = 0.15  # 15% max deviation
 
 # Maximum time to hold inventory before force-liquidation (seconds)
-# INSTITUTION-GRADE: 30 minutes (reduced from 1 hour)
-# Binary markets move fast - shorter hold time reduces directional risk
-MM_MAX_INVENTORY_HOLD_TIME: Final[int] = 1800  # 30 minutes
+# INSTITUTIONAL HFT STANDARD: 15 minutes (900 seconds)
+# Rationale:
+#   - Binary prediction markets move rapidly on news/events
+#   - Shorter hold time = reduced directional risk exposure
+#   - Industry standard: 15-30 min for binary MM, 1-2 hours for equity MM
+#   - Forces discipline: take small losses fast, avoid large drawdowns
+# Previous: 30 minutes (too long for small accounts)
+MM_MAX_INVENTORY_HOLD_TIME: Final[int] = 900  # 15 minutes
 
 # Position check interval (seconds)
 MM_POSITION_CHECK_INTERVAL: Final[int] = 30
@@ -650,13 +669,15 @@ MM_POSITION_CHECK_INTERVAL: Final[int] = 30
 MM_EMERGENCY_EXIT_THRESHOLD: Final[float] = 0.15
 
 # Maximum directional exposure per market (USD)
-# INSTITUTIONAL HFT STANDARD: $200 per market
+# INSTITUTIONAL HFT STANDARD: 10-20% of capital per market
+# Current: $15.00 (15% of $100 principal)
 # Rationale:
 #   - Limits single-market delta risk (correlation with other positions)
 #   - Ensures portfolio remains market-neutral (sum of deltas ≈ 0)
 #   - Prevents concentration risk in binary outcomes
-# Formula: abs(long_exposure - short_exposure) ≤ $200
-MM_MAX_DIRECTIONAL_EXPOSURE_PER_MARKET: Final[float] = 200.0
+#   - Scaled proportionally for $100 account (was $200 for $5k account)
+# Formula: abs(long_exposure - short_exposure) ≤ $15
+MM_MAX_DIRECTIONAL_EXPOSURE_PER_MARKET: Final[float] = 15.0
 
 # Gamma (Risk Aversion Parameter) for Avellaneda-Stoikov inventory skew
 # INSTITUTIONAL HFT STANDARD: 0.15
