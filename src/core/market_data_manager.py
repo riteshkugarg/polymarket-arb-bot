@@ -520,6 +520,11 @@ class PolymarketWSManager:
                     continue
                 
                 message = await self._ws.recv()
+                
+                # Skip ping/pong frames and empty messages
+                if not message or not isinstance(message, str):
+                    continue
+                    
                 data = json.loads(message)
                 
                 # Route message to appropriate queue

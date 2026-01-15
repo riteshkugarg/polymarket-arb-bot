@@ -830,7 +830,8 @@ class MarketMakingStrategy(BaseStrategy):
         config: Optional[Dict[str, Any]] = None,
         execution_gateway: Optional[Any] = None,  # CRITICAL FIX #1: Centralized routing
         inventory_manager: Optional[Any] = None,  # AUDIT FIX: Unified position tracking
-        risk_controller: Optional[Any] = None  # AUDIT FIX: Circuit breaker authority
+        risk_controller: Optional[Any] = None,  # AUDIT FIX: Circuit breaker authority
+        max_capital: Optional[float] = None  # INSTITUTIONAL: Dynamic capital allocation
     ):
         """
         Initialize market making strategy
@@ -843,6 +844,7 @@ class MarketMakingStrategy(BaseStrategy):
             execution_gateway: Centralized order routing with STP
             inventory_manager: Unified inventory tracking authority
             risk_controller: Risk management and circuit breaker
+            max_capital: Dynamically allocated capital (overrides constant)
         """
         super().__init__(client, order_manager, config)
         
@@ -856,8 +858,9 @@ class MarketMakingStrategy(BaseStrategy):
         self._inventory_manager = inventory_manager
         self._risk_controller = risk_controller
         
-        # Budget tracking
-        self._allocated_capital = Decimal(str(MARKET_MAKING_STRATEGY_CAPITAL))
+        # Budget tracking - Use dynamic allocation if provided
+        allocated_amount = max_capital if max_capital is not None else MARKET_MAKING_STRATEGY_CAPITAL
+        self._allocated_capital = Decimal(str(allocated_amount))
         self._capital_used = Decimal('0')
         
         # Active positions

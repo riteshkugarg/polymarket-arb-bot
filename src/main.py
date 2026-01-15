@@ -284,7 +284,17 @@ class PolymarketBot:
             # ========================================================================
             logger.info("\n[LAYER 1] Risk Management System")
             
-            total_capital = ARBITRAGE_STRATEGY_CAPITAL + MARKET_MAKING_STRATEGY_CAPITAL
+            # INSTITUTIONAL CAPITAL ALLOCATION: Use dynamic percentage-based allocation
+            from config.capital_allocator import calculate_strategy_capital
+            current_balance = float(self.balance)
+            allocations = calculate_strategy_capital(current_balance)
+            
+            total_capital = allocations['market_making'] + allocations['arbitrage']
+            logger.info(f"Dynamic Capital Allocation (Balance: ${current_balance:.2f}):")
+            logger.info(f"  MM:  ${allocations['market_making']:.2f} ({'ENABLED' if allocations['mm_enabled'] else 'DISABLED'})")
+            logger.info(f"  Arb: ${allocations['arbitrage']:.2f} ({'ENABLED' if allocations['arb_enabled'] else 'DISABLED'})")
+            logger.info(f"  Reserve: ${allocations['reserve']:.2f}")
+            
             self.risk_controller = RiskController(
                 initial_capital=float(total_capital),
                 max_drawdown_pct=0.02,  # 2% kill switch
@@ -369,6 +379,9 @@ class PolymarketBot:
             # ========================================================================
             logger.info("\n[LAYER 6] Trading Strategies")
             
+            # Store allocations for runtime access
+            self._capital_allocations = allocations
+            
             # Initialize arbitrage strategy with event-driven WebSocket support
             from strategies.arbitrage_strategy import ArbitrageStrategy
             arb_strategy = ArbitrageStrategy(
@@ -378,7 +391,8 @@ class PolymarketBot:
                 atomic_executor=self.atomic_executor,  # Depth-aware execution
                 execution_gateway=self.execution_gateway,  # FIX 2: Centralized routing
                 inventory_manager=self.inventory_manager,  # AUDIT FIX: Unified positions
-                risk_controller=self.risk_controller  # AUDIT FIX: Circuit breaker
+                risk_controller=self.risk_controller,  # AUDIT FIX: Circuit breaker
+                max_capital=allocations['arbitrage']  # Dynamic capital allocation
             )
             self.strategies.append(arb_strategy)
             logger.info("✅ ArbitrageStrategy initialized (EVENT-DRIVEN WebSocket + STP + Risk Controls)")
@@ -390,7 +404,8 @@ class PolymarketBot:
                 market_data_manager=self.market_data_manager,  # Pass WebSocket manager
                 execution_gateway=self.execution_gateway,  # FIX 2: Centralized routing
                 inventory_manager=self.inventory_manager,  # AUDIT FIX: Unified positions
-                risk_controller=self.risk_controller  # AUDIT FIX: Circuit breaker
+                risk_controller=self.risk_controller,  # AUDIT FIX: Circuit breaker
+                max_capital=allocations['market_making']  # Dynamic capital allocation
             )
             self.strategies.append(market_making_strategy)
             logger.info("✅ Market Making Strategy initialized (WebSocket + ExecutionGateway + Risk Controls)")

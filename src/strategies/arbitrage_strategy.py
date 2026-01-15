@@ -98,7 +98,8 @@ class ArbitrageStrategy(BaseStrategy):
         market_data_manager: Optional[MarketDataManager] = None,
         execution_gateway: Optional[Any] = None,  # CRITICAL FIX #1: Centralized routing
         inventory_manager: Optional[Any] = None,  # AUDIT FIX: Unified position tracking
-        risk_controller: Optional[Any] = None  # AUDIT FIX: Circuit breaker authority
+        risk_controller: Optional[Any] = None,  # AUDIT FIX: Circuit breaker authority
+        max_capital: Optional[float] = None  # INSTITUTIONAL: Dynamic capital allocation
     ):
         """
         Initialize arbitrage strategy
@@ -112,6 +113,7 @@ class ArbitrageStrategy(BaseStrategy):
             execution_gateway: Centralized order routing with STP
             inventory_manager: Unified inventory tracking authority
             risk_controller: Risk management and circuit breaker
+            max_capital: Dynamically allocated capital (overrides constant)
         """
         super().__init__(client, order_manager, config)
         
@@ -122,8 +124,16 @@ class ArbitrageStrategy(BaseStrategy):
         self._inventory_manager = inventory_manager
         self._risk_controller = risk_controller
         
+        # Capital allocation - Use dynamic allocation if provided
+        self._max_capital = max_capital if max_capital is not None else None
+        
         # Pass market_data_manager to scanner for cache access
-        self.scanner = ArbScanner(client, order_manager, market_data_manager=market_data_manager)
+        self.scanner = ArbScanner(
+            client, 
+            order_manager, 
+            market_data_manager=market_data_manager,
+            max_budget=self._max_capital  # Pass capital to scanner
+        )
         self.executor = AtomicExecutor(client, order_manager)
         self.atomic_executor = atomic_executor or AtomicDepthAwareExecutor(client, order_manager)
         self.use_depth_aware_executor = atomic_executor is not None

@@ -174,7 +174,8 @@ class ArbScanner:
         self,
         client: PolymarketClient,
         order_manager: OrderManager,
-        market_data_manager: Optional[Any] = None
+        market_data_manager: Optional[Any] = None,
+        max_budget: Optional[float] = None  # INSTITUTIONAL: Dynamic capital allocation
     ):
         """
         Initialize arbitrage scanner
@@ -183,10 +184,12 @@ class ArbScanner:
             client: Polymarket CLOB client
             order_manager: Order execution manager
             market_data_manager: Real-time market data manager (optional)
+            max_budget: Dynamically allocated capital (optional)
         """
         self.client = client
         self.order_manager = order_manager
         self.market_data_manager = market_data_manager  # WebSocket data source
+        self._max_budget = max_budget  # Store for runtime use
         self._cache: Dict[str, Dict] = {}  # Market data cache
         self._last_scan_time = 0
         self._scan_interval = 5  # Seconds between full scans
@@ -201,6 +204,7 @@ class ArbScanner:
             f"  Order book cache TTL: {self._cache_ttl_seconds}s (rate limit protection)\\n"
             f"  WebSocket Mode: {'ENABLED' if market_data_manager else 'DISABLED (REST fallback)'}\\n"
             f"  SMART SLIPPAGE: Depth-based ({SLIPPAGE_TIGHT:.3f} - {SLIPPAGE_LOOSE:.3f})"
+            + (f"\\n  Max Budget: ${max_budget:.2f}" if max_budget is not None else "")
         )
     
     def _calculate_smart_slippage(self, available_depth: float) -> float:
