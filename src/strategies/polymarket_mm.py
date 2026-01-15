@@ -65,7 +65,12 @@ from config.constants import (
     MM_BOUNDARY_THRESHOLD_LOW,
     MM_BOUNDARY_THRESHOLD_HIGH,
     NEGRISK_BUFFER_TICKS,
-    FEE_RATE_BPS_MAKER
+    FEE_RATE_BPS_MAKER,
+    MM_OBI_THRESHOLD,
+    MM_TOXIC_VELOCITY_THRESHOLD,
+    MM_TOXIC_FLOW_WINDOW,
+    MM_TOXIC_FLOW_COOLDOWN,
+    MM_MIN_TICK_SIZE,
 )
 
 
@@ -84,12 +89,20 @@ class MarketState:
     spread: float
     timestamp: float
     
+    # Order Book Imbalance (OBI) - Momentum signal
+    obi: float = 0.0  # (bid_size - ask_size) / (bid_size + ask_size)
+    
     # Order book depth (for κ calculation)
     bid_depth_5ticks: float = 0.0
     ask_depth_5ticks: float = 0.0
     
     # Price history for volatility calculation
     price_history: deque = field(default_factory=lambda: deque(maxlen=120))  # 60s @ 0.5s updates
+    
+    # Adaptive Z-Score tracking (2026 HFT Signal Hardening)
+    volatility_5s: deque = field(default_factory=lambda: deque(maxlen=10))  # 5-second window (10 samples @ 0.5s)
+    volatility_60s: deque = field(default_factory=lambda: deque(maxlen=120))  # 60-second window
+    last_volatility_check: float = 0.0
 
 
 @dataclass
@@ -105,7 +118,7 @@ class Position:
 
 @dataclass
 class SafetyMetrics:
-    """Safety monitoring metrics"""
+    """Safety monitoring metrics with toxic flow detection (2026 HFT Anti-Sniping)"""
     # PnL tracking for kill-switch
     pnl_history: deque = field(default_factory=lambda: deque(maxlen=120))  # 60 minutes @ 30s intervals
     cumulative_pnl: float = 0.0
@@ -125,6 +138,11 @@ class SafetyMetrics:
     
     # WebSocket health
     last_heartbeat: float = 0.0
+    
+    # Toxic flow detection (Anti-Sniping Protection)
+    # Track recent fills with timestamps to detect velocity attacks
+    recent_fills: deque = field(default_factory=lambda: deque(maxlen=20))  # Last 20 fills with timestamps
+    toxic_flow_cooldown_until: float = 0.0  # Unix timestamp when cooldown expires
 
 
 @dataclass
@@ -875,6 +893,18 @@ class PolymarketMM:
             state.ask_size = float(asks[0]['size'])
             state.timestamp = time.time()
             
+            # Update OBI (Order Book Imbalance) - Institutional momentum signal
+            # Extract from snapshot if available, otherwise calculate
+            if hasattr(snapshot, 'obi'):
+                state.obi = snapshot.obi
+            else:
+                # Calculate OBI: (bid_size - ask_size) / (bid_size + ask_size)
+                total_size = state.bid_size + state.ask_size
+                if total_size > 0:
+                    state.obi = (state.bid_size - state.ask_size) / total_size
+                else:
+                    state.obi = 0.0
+            
             # Update price history
             state.price_history.append((state.timestamp, state.mid_price))
             
@@ -933,6 +963,82 @@ class PolymarketMM:
                 
                 self.total_fills += 1
                 
+                # ═══════════════════════════════════════════════════════════════════
+                # TOXIC FLOW DETECTION (Anti-Sniping Protection - 2026 HFT)
+                # ═══════════════════════════════════════════════════════════════════
+                # Track fill velocity: If >5 fills in 10s without favorable price move
+                # → Trigger 30s cooldown to prevent being drained by informed traders
+                # ═══════════════════════════════════════════════════════════════════
+                
+                current_time = time.time()
+                
+                # Record fill with timestamp
+                self.safety_metrics.recent_fills.append({
+                    'timestamp': current_time,
+                    'token_id': token_id,
+                    'side': fill.side,
+                    'price': fill.price,
+                    'size': fill.size
+                })
+                
+                # Count fills in the velocity window (last 10 seconds)
+                recent_fills_in_window = [
+                    f for f in self.safety_metrics.recent_fills
+                    if current_time - f['timestamp'] <= MM_TOXIC_FLOW_WINDOW
+                ]
+                
+                fill_velocity = len(recent_fills_in_window)
+                
+                # Check if velocity threshold exceeded
+                if fill_velocity > MM_TOXIC_VELOCITY_THRESHOLD:
+                    # Additional check: Verify price hasn't moved favorably
+                    # (if price moved in our favor, fills are profitable, not toxic)
+                    state = self.market_states.get(token_id)
+                    if state:
+                        # Get average fill price in window
+                        avg_fill_price = sum(f['price'] for f in recent_fills_in_window) / fill_velocity
+                        current_mid = state.mid_price
+                        price_move = current_mid - avg_fill_price
+                        
+                        # Threshold: Price should move at least 0.5% in our favor
+                        favorable_threshold = 0.005
+                        
+                        # Check if fills were predominantly buys or sells
+                        buy_count = sum(1 for f in recent_fills_in_window if f['side'] == 'BUY')
+                        sell_count = len(recent_fills_in_window) - buy_count
+                        
+                        is_toxic = False
+                        if buy_count > sell_count:  # We bought (went long)
+                            # Price should rise for favorable outcome
+                            if price_move < favorable_threshold:
+                                is_toxic = True
+                        elif sell_count > buy_count:  # We sold (went short)
+                            # Price should fall for favorable outcome
+                            if price_move > -favorable_threshold:
+                                is_toxic = True
+                        
+                        if is_toxic:
+                            # Trigger cooldown
+                            cooldown_until = current_time + MM_TOXIC_FLOW_COOLDOWN
+                            self.safety_metrics.toxic_flow_cooldown_until = cooldown_until
+                            
+                            logger.critical(
+                                f"🚨 [TOXIC FLOW DETECTED] Token: {token_id[:8]}... - "
+                                f"Velocity: {fill_velocity} fills in {MM_TOXIC_FLOW_WINDOW}s "
+                                f"(threshold: {MM_TOXIC_VELOCITY_THRESHOLD}) - "
+                                f"Avg fill price: ${avg_fill_price:.4f}, Current mid: ${current_mid:.4f}, "
+                                f"Price move: {price_move*100:+.2f}% (unfavorable) - "
+                                f"Buy/Sell: {buy_count}/{sell_count} - "
+                                f"TRIGGERING {MM_TOXIC_FLOW_COOLDOWN}s COOLDOWN to prevent liquidity drain"
+                            )
+                            
+                            # Cancel all active orders immediately
+                            try:
+                                await self.order_manager.cancel_all_orders()
+                                logger.warning(f"[TOXIC FLOW] All orders cancelled for cooldown period")
+                            except Exception as e:
+                                logger.error(f"[TOXIC FLOW] Failed to cancel orders: {e}")
+                
                 logger.info(
                     f"[FILL] {fill.side} {fill.size:.1f} @ ${fill.price:.4f} "
                     f"(position: {position.quantity:+.1f}, realized PnL: ${position.realized_pnl:+.2f})"
@@ -959,12 +1065,21 @@ class PolymarketMM:
     def _calculate_volatility(self, state: MarketState) -> float:
         """
         Calculate rolling volatility (σ) from price history
+        WITH ADAPTIVE Z-SCORE EMERGENCY REFRESH (2026 HFT Signal Hardening)
         
-        Uses 60-second rolling window of mid-price log returns.
+        INSTITUTIONAL UPGRADE:
+        - Monitors 5-second vs 60-second volatility ratio
+        - If 5s_vol > 2.0 × 60s_vol → EMERGENCY SIGNAL REFRESH triggered
+        - Forces immediate Z-Score recalculation (bypass Z_SCORE_UPDATE_INTERVAL)
+        - Prevents stale signals during high-frequency bursts
+        
+        Uses 60-second rolling window of mid-price log returns for base calculation.
         
         Returns:
             Annualized volatility (for use in A-S formulas)
         """
+        from decimal import Decimal
+        
         if len(state.price_history) < 2:
             return 0.01  # Default 1% volatility
         
@@ -990,12 +1105,64 @@ class PolymarketMM:
         # σ_annual = σ_interval * sqrt(periods_per_year)
         # periods_per_year = (365.25 * 24 * 3600) / 0.5 = 63,115,200
         annualization_factor = math.sqrt(63_115_200)
-        volatility = std_dev * annualization_factor
+        volatility_60s = std_dev * annualization_factor
         
         # Clamp to reasonable range [0.1%, 100%]
-        volatility = max(0.001, min(1.0, volatility))
+        volatility_60s = max(0.001, min(1.0, volatility_60s))
         
-        return volatility
+        # ═══════════════════════════════════════════════════════════════════
+        # ADAPTIVE Z-SCORE: Emergency Signal Refresh Detection
+        # ═══════════════════════════════════════════════════════════════════
+        # Track 5-second volatility for burst detection
+        state.volatility_60s.append(Decimal(str(volatility_60s)))
+        
+        # Calculate 5-second volatility (last 10 samples @ 0.5s interval)
+        if len(state.price_history) >= 10:
+            recent_prices = list(state.price_history)[-10:]
+            recent_returns = []
+            
+            for i in range(1, len(recent_prices)):
+                t1, p1 = recent_prices[i-1]
+                t2, p2 = recent_prices[i]
+                
+                if p1 > 0 and p2 > 0:
+                    log_return = math.log(p2 / p1)
+                    recent_returns.append(log_return)
+            
+            if len(recent_returns) >= 2:
+                std_dev_5s = statistics.stdev(recent_returns)
+                volatility_5s = std_dev_5s * annualization_factor
+                volatility_5s = max(0.001, min(1.0, volatility_5s))
+                
+                state.volatility_5s.append(Decimal(str(volatility_5s)))
+                
+                # Check for emergency refresh trigger
+                current_time = time.time()
+                if len(state.volatility_60s) >= 10:  # Need baseline
+                    avg_60s = float(sum(state.volatility_60s) / len(state.volatility_60s))
+                    
+                    # TRIGGER: 5s volatility > 2.0 × 60s average
+                    if volatility_5s > (2.0 * avg_60s):
+                        # Throttle to max 1 trigger per 5 seconds (avoid spam)
+                        if current_time - state.last_volatility_check >= 5.0:
+                            state.last_volatility_check = current_time
+                            
+                            # Signal emergency refresh to parent strategy
+                            # This will force immediate Z-Score recalculation
+                            logger.warning(
+                                f"🚨 [ADAPTIVE Z-SCORE] EMERGENCY SIGNAL REFRESH - "
+                                f"Token: {state.token_id[:8]}... - "
+                                f"5s_vol={volatility_5s:.4f} > 2.0 × 60s_avg={avg_60s:.4f} "
+                                f"(ratio: {volatility_5s/avg_60s:.2f}x) - "
+                                f"High-frequency burst detected, forcing immediate Z-Score update"
+                            )
+                            
+                            # Store flag for strategy to check
+                            if not hasattr(state, 'emergency_refresh_triggered'):
+                                state.emergency_refresh_triggered = False
+                            state.emergency_refresh_triggered = True
+        
+        return volatility_60s
     
     def _calculate_gamma(self, state: MarketState) -> float:
         """
@@ -1060,21 +1227,27 @@ class PolymarketMM:
     ) -> float:
         """
         Calculate reservation price (r) using Avellaneda-Stoikov formula
-        WITH BOUNDARY ADJUSTMENTS (2026 Institution-Grade)
+        WITH OBI MOMENTUM ADJUSTMENT (2026 Hybrid Upgrade)
         
         Standard Formula: r = s - q*gamma*sigma^2
         
-        Boundary-Adjusted Formula: r = s - q*gamma*(sigma * sigma_multiplier)^2
+        Hybrid Formula (Z-Score + OBI):
+        r = s - q*gamma*sigma^2 + OBI_Adjustment
         
         where:
         - s = mid-price
         - q = inventory position
         - gamma = risk aversion
-        - sigma = base volatility
-        - sigma_multiplier = 1.0 (normal) to 2.0 (extreme boundaries)
+        - sigma = volatility
+        - OBI_Adjustment = +1 tick if OBI > 0.6 (heavy buying), -1 tick if OBI < -0.6 (heavy selling)
+        
+        Rationale:
+        - OBI > 0.6 = Heavy buying pressure (price likely to rise) → shift reservation UP to avoid being 'picked off'
+        - OBI < -0.6 = Heavy selling pressure (price likely to fall) → shift reservation DOWN
+        - OBI adjustment prevents adverse selection during momentum bursts
         
         Returns:
-            Reservation price (boundary-adjusted)
+            Reservation price (boundary-adjusted + OBI momentum)
         """
         s = state.mid_price
         q = position.quantity
@@ -1091,24 +1264,95 @@ class PolymarketMM:
         # Apply boundary-adjusted volatility
         adjusted_sigma = base_sigma * boundary.volatility_multiplier
         
-        # Calculate base reservation price with adjusted volatility
-        r_base = s - q * gamma * (adjusted_sigma ** 2)
+        # ═══════════════════════════════════════════════════════════════════
+        # CONVEX INVENTORY PENALTY (2026 HFT Risk Hardening)
+        # ═══════════════════════════════════════════════════════════════════
+        # LINEAR SKEW (Old): skew = q × γ × σ²
+        # Problem: Last 20% of inventory costs same as first 20% → "inventory pinning"
+        #
+        # CONVEX SKEW (New): Apply exponential multiplier when abs(q) > 0.7 × MAX_INVENTORY
+        # Formula: skew = base_skew × exp(COEFFICIENT × overage_ratio)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        from decimal import Decimal
+        from config.constants import MM_CONVEX_RISK_COEFFICIENT, MM_MAX_INVENTORY_PER_OUTCOME
+        
+        # Calculate base inventory skew (linear)
+        base_inventory_skew = q * gamma * (adjusted_sigma ** 2)
+        
+        # Check for convex penalty trigger
+        abs_inventory = abs(q)
+        max_inventory = float(MM_MAX_INVENTORY_PER_OUTCOME)
+        convex_threshold = 0.7 * max_inventory
+        
+        if abs_inventory > convex_threshold:
+            # Calculate overage ratio: how much beyond 70% threshold
+            overage = abs_inventory - convex_threshold
+            remaining_capacity = max_inventory - convex_threshold  # 30% of max
+            overage_ratio = overage / remaining_capacity  # Range: [0, 1]
+            
+            # Exponential multiplier: exp(COEFFICIENT × overage_ratio)
+            # At 70% inventory: multiplier = exp(2.0 × 0.0) = 1.00x (no change)
+            # At 85% inventory: multiplier = exp(2.0 × 0.5) ≈ 2.72x
+            # At 100% inventory: multiplier = exp(2.0 × 1.0) ≈ 7.39x
+            convex_multiplier = math.exp(float(MM_CONVEX_RISK_COEFFICIENT) * overage_ratio)
+            
+            # Apply convex penalty
+            convex_inventory_skew = base_inventory_skew * convex_multiplier
+            
+            logger.warning(
+                f"🔺 [CONVEX PENALTY] Token: {state.token_id[:8]}... - "
+                f"Inventory: {q:+.1f} > threshold {convex_threshold:.1f} ({abs_inventory/max_inventory*100:.0f}% of max) - "
+                f"Base skew: ${base_inventory_skew:.4f}, "
+                f"Convex multiplier: {convex_multiplier:.2f}x, "
+                f"Final skew: ${convex_inventory_skew:.4f} - "
+                f"FORCING AGGRESSIVE UNWIND"
+            )
+            
+            base_inventory_skew = convex_inventory_skew
+        
+        # Calculate base reservation price with convex-adjusted inventory skew
+        r_base = s - base_inventory_skew
         
         # Apply exponential skew adjustment (in basis points)
         skew_adjustment = boundary.skew_adjustment_bps / 10000  # Convert bps to decimal
         r = r_base - skew_adjustment
         
+        # ═══════════════════════════════════════════════════════════════════
+        # OBI MOMENTUM ADJUSTMENT (2026 HYBRID UPGRADE)
+        # ═══════════════════════════════════════════════════════════════════
+        # Shift reservation price by 1 tick when OBI is extreme
+        # Prevents being 'picked off' by informed order flow
+        
+        obi_adjustment = 0.0
+        if abs(state.obi) > MM_OBI_THRESHOLD:
+            tick_size = 0.01  # Polymarket 1-cent tick
+            if state.obi > MM_OBI_THRESHOLD:
+                # Heavy buying (OBI > 0.6) → shift reservation UP by 1 tick
+                obi_adjustment = tick_size
+                logger.debug(
+                    f"[OBI MOMENTUM] Heavy BUYING detected (OBI={state.obi:+.2f}) → "
+                    f"Shifting reservation UP by {tick_size:.3f}"
+                )
+            elif state.obi < -MM_OBI_THRESHOLD:
+                # Heavy selling (OBI < -0.6) → shift reservation DOWN by 1 tick
+                obi_adjustment = -tick_size
+                logger.debug(
+                    f"[OBI MOMENTUM] Heavy SELLING detected (OBI={state.obi:+.2f}) → "
+                    f"Shifting reservation DOWN by {tick_size:.3f}"
+                )
+        
+        # Apply OBI adjustment to reservation price
+        r += obi_adjustment
+        
         # Log boundary adjustments
-        if boundary.is_extreme:
+        if boundary.is_extreme or abs(state.obi) > MM_OBI_THRESHOLD:
             logger.debug(
-                f"[BOUNDARY RESERVATION] Base: ${r_base:.4f}, "
+                f"[HYBRID RESERVATION] Base: ${r_base:.4f}, "
                 f"Skew: {boundary.skew_adjustment_bps:+.1f}bps, "
-                f"Final: ${r:.4f} (regime: {boundary.regime})"
+                f"OBI Adj: ${obi_adjustment:+.4f}, "
+                f"Final: ${r:.4f} (regime: {boundary.regime}, OBI: {state.obi:+.2f})"
             )
-        
-        sigma = self._calculate_volatility(state)
-        
-        r = s - q * gamma * (sigma ** 2)
         
         # Clamp to valid range [0.01, 0.99] for binary outcomes
         r = max(0.01, min(0.99, r))
@@ -1218,16 +1462,53 @@ class PolymarketMM:
             bid = r - delta / 2
             ask = r + delta / 2
             
+            # ═══════════════════════════════════════════════════════════════════
+            # ZERO-CROSS SPREAD PROTECTION (2026 HFT Safety)
+            # ═══════════════════════════════════════════════════════════════════
+            # Prevent bid >= ask due to extreme inventory skew or boundary conditions
+            # If spread crosses zero, force minimum 2-tick spread
+            # ═══════════════════════════════════════════════════════════════════
+            
+            from decimal import Decimal
+            
+            bid_dec = Decimal(str(bid))
+            ask_dec = Decimal(str(ask))
+            min_tick = Decimal(str(MM_MIN_TICK_SIZE))
+            
+            if bid_dec >= ask_dec:
+                # Spread has crossed or inverted - force minimum spread
+                min_spread = min_tick * 2  # 2 ticks = 0.02
+                
+                # Center around reservation price
+                r_dec = Decimal(str(r))
+                bid_dec = r_dec - (min_spread / 2)
+                ask_dec = r_dec + (min_spread / 2)
+                
+                logger.warning(
+                    f"⚠️ [ZERO-CROSS PROTECTION] Token: {token_id[:8]}... - "
+                    f"Original bid ${float(bid):.4f} >= ask ${float(ask):.4f} - "
+                    f"Forcing minimum spread: bid=${float(bid_dec):.4f}, ask=${float(ask_dec):.4f} "
+                    f"(Δ=${float(min_spread):.4f}) - "
+                    f"Extreme skew detected (inventory: {position.quantity:+.1f})"
+                )
+                
+                bid = float(bid_dec)
+                ask = float(ask_dec)
+            
             # Ensure quotes are within valid range [0.01, 0.99]
             bid = max(0.01, min(0.99, bid))
             ask = max(0.01, min(0.99, ask))
             
-            # Ensure bid < ask
+            # Final sanity check: Ensure bid < ask (after clamping)
             if bid >= ask:
                 mid = (bid + ask) / 2
-                spread = 0.001  # Minimum 0.1% spread
+                spread = float(min_tick * 2)  # Minimum 2-tick spread
                 bid = mid - spread / 2
                 ask = mid + spread / 2
+                
+                # Re-clamp after adjustment
+                bid = max(0.01, min(0.99, bid))
+                ask = max(0.01, min(0.99, ask))
             
             return (bid, ask)
             
@@ -1248,6 +1529,20 @@ class PolymarketMM:
         
         while self.is_running and not self.is_killed:
             try:
+                # ═══════════════════════════════════════════════════════════════════
+                # TOXIC FLOW COOLDOWN CHECK (Anti-Sniping Protection)
+                # ═══════════════════════════════════════════════════════════════════
+                current_time = time.time()
+                
+                if current_time < self.safety_metrics.toxic_flow_cooldown_until:
+                    cooldown_remaining = self.safety_metrics.toxic_flow_cooldown_until - current_time
+                    logger.warning(
+                        f"🛡️ [TOXIC FLOW COOLDOWN] Skipping quote update - "
+                        f"{cooldown_remaining:.1f}s remaining"
+                    )
+                    await asyncio.sleep(interval_sec)
+                    continue
+                
                 # Update all markets
                 for token_id in self.markets:
                     if token_id in self.market_states:

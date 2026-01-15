@@ -54,13 +54,15 @@ from config.constants import (
     # Budget allocation
     MARKET_MAKING_STRATEGY_CAPITAL,
     
-    # Market selection
-    MM_MIN_MARKET_VOLUME_24H,
+    # Market selection - Adaptive Capacity Filtering
+    MM_MAX_MARKETS,
+    MM_VOLUME_MULTIPLIER,
+    MM_HARD_FLOOR_VOLUME,
     MM_MIN_LIQUIDITY_DEPTH,
     MM_MIN_DEPTH_SHARES,
     MM_MAX_SPREAD_PERCENT,
     MM_PREFER_BINARY_MARKETS,
-    MM_MAX_ACTIVE_MARKETS,
+    MM_MAX_ACTIVE_MARKETS,  # Deprecated, use MM_MAX_MARKETS
     
     # Position sizing
     MM_BASE_POSITION_SIZE,
@@ -102,6 +104,10 @@ from config.constants import (
     Z_SCORE_HALT_THRESHOLD,
     MM_Z_SENSITIVITY,
     Z_SCORE_UPDATE_INTERVAL,
+    
+    # OBI (Order Book Imbalance) - Momentum Detection
+    MM_OBI_THRESHOLD,
+    MM_MOMENTUM_PROTECTION_TIME,
 )
 from utils.logger import get_logger
 from utils.exceptions import StrategyError
@@ -167,7 +173,7 @@ class ZScoreManager:
     
     def __init__(self, lookback_periods: int = Z_SCORE_LOOKBACK_PERIODS):
         """
-        Initialize Z-Score calculator with rolling window
+        Initialize Z-Score calculator with EWMA volatility (2026 HFT Upgrade)
         
         Args:
             lookback_periods: Number of mid-price samples to store (default: 20)
@@ -178,23 +184,33 @@ class ZScoreManager:
         self.last_update_time = 0.0
         self.current_z_score = 0.0
         
+        # EWMA Volatility tracking (RiskMetrics Standard)
+        # Import here to avoid circular dependency
+        from config.constants import MM_VOL_DECAY_LAMBDA
+        self.ewma_lambda = MM_VOL_DECAY_LAMBDA  # 0.94 decay factor
+        self.ewma_variance = None  # Initialize on first return
+        self.last_price = None
+        
         logger.info(
-            f"ZScoreManager initialized - "
+            f"ZScoreManager initialized (EWMA volatility) - "
             f"Lookback: {lookback_periods} periods, "
             f"Entry threshold: ±{Z_SCORE_ENTRY_THRESHOLD:.1f}σ, "
             f"Halt threshold: ±{Z_SCORE_HALT_THRESHOLD:.1f}σ, "
-            f"Sensitivity: ${MM_Z_SENSITIVITY:.4f}/σ"
+            f"Sensitivity: ${MM_Z_SENSITIVITY:.4f}/σ, "
+            f"EWMA Lambda: {self.ewma_lambda} (RiskMetrics standard)"
         )
     
     def update(self, micro_price: float) -> float:
         """
         Update rolling window with new MICRO-PRICE sample and recalculate Z-Score
+        WITH EWMA VOLATILITY (2026 HFT Adaptive Sigma Upgrade)
         
         INSTITUTIONAL UPGRADE (2026):
         - Switched from mid_price (lagging) to micro_price (volume-weighted mid)
         - Micro-price = (bid×ask_size + ask×bid_size) / (bid_size + ask_size)
         - Provides 500ms-1500ms lead time on mean reversion vs simple mid
         - Detects order book imbalance BEFORE mid-price reflects it
+        - **NEW**: EWMA volatility (λ=0.94) reacts instantly to volatility spikes
         
         Args:
             micro_price: Volume-weighted mid-price from order book imbalance
@@ -204,10 +220,12 @@ class ZScoreManager:
         
         Mathematical Steps:
         1. Append new micro-price to rolling window (auto-evicts oldest if full)
-        2. Calculate mean: μ = Σ(micro_prices) / N
-        3. Calculate std dev: σ = sqrt(Σ(micro_price - μ)² / N)
-        4. Calculate Z-Score: Z = (current_micro_price - μ) / σ
+        2. Calculate EWMA volatility: σ²(t) = λ×σ²(t-1) + (1-λ)×return²(t)
+        3. Calculate mean: μ = Σ(micro_prices) / N
+        4. Calculate Z-Score: Z = (current_micro_price - μ) / σ_EWMA
         """
+        from decimal import Decimal
+        
         # Add micro-price to rolling window (deque auto-manages size)
         self.price_window.append(micro_price)
         self.last_update_time = time.time()
@@ -221,23 +239,55 @@ class ZScoreManager:
             self.current_z_score = 0.0
             return 0.0
         
-        # Calculate rolling statistics
+        # Calculate rolling mean (for Z-Score center)
         mean = statistics.mean(self.price_window)
         
-        # Guard against zero variance (constant price)
-        try:
-            std_dev = statistics.stdev(self.price_window)
-            if std_dev < 1e-6:  # Effectively zero variance
-                logger.debug("Z-Score: Zero variance detected (flat price) - Using Z=0")
-                self.current_z_score = 0.0
-                return 0.0
-        except statistics.StatisticsError:
-            # Single unique value in window
+        # ═══════════════════════════════════════════════════════════════════
+        # EWMA VOLATILITY (RiskMetrics Standard - λ=0.94)
+        # ═══════════════════════════════════════════════════════════════════
+        # Formula: σ²(t) = λ × σ²(t-1) + (1-λ) × return²(t)
+        # Rationale: Simple std dev is too slow - EWMA reacts instantly to spikes
+        # ═══════════════════════════════════════════════════════════════════
+        
+        if self.last_price is not None:
+            # Calculate squared return
+            if self.last_price > 0:
+                log_return = math.log(micro_price / self.last_price)
+                squared_return = log_return ** 2
+            else:
+                squared_return = 0.0
+            
+            # Update EWMA variance
+            if self.ewma_variance is None:
+                # Initialize with squared return
+                self.ewma_variance = squared_return
+            else:
+                # EWMA update: σ²(t) = λ×σ²(t-1) + (1-λ)×return²(t)
+                self.ewma_variance = (self.ewma_lambda * self.ewma_variance + \n                                      (1 - self.ewma_lambda) * squared_return)
+            
+            # Extract std dev from variance
+            ewma_std_dev = math.sqrt(self.ewma_variance) if self.ewma_variance > 0 else 1e-6
+            
+        else:
+            # First update - fallback to simple std dev
+            try:
+                ewma_std_dev = statistics.stdev(self.price_window)
+                if ewma_std_dev < 1e-6:
+                    ewma_std_dev = 1e-6
+            except statistics.StatisticsError:
+                ewma_std_dev = 1e-6
+        
+        # Update last price for next iteration
+        self.last_price = micro_price
+        
+        # Guard against zero variance
+        if ewma_std_dev < 1e-6:
+            logger.debug("Z-Score: Zero EWMA variance detected (flat price) - Using Z=0")
             self.current_z_score = 0.0
             return 0.0
         
-        # Calculate Z-Score using current micro_price (FIXED: was undefined mid_price)
-        self.current_z_score = (micro_price - mean) / std_dev
+        # Calculate Z-Score using EWMA volatility
+        self.current_z_score = (micro_price - mean) / ewma_std_dev
         
         return self.current_z_score
     
@@ -575,6 +625,9 @@ class MarketMakingStrategy(BaseStrategy):
         self._inventory_defense_mode: Dict[str, float] = {}  # market_id -> end_time
         self._defense_mode_duration = 60  # Stay in defense mode for 60 seconds
         
+        # Toxic flow filter (Z-Score vs OBI momentum conflict)
+        self._toxic_flow_paused: Dict[str, float] = {}  # market_id -> resume_time
+        
         # CRITICAL FIX #1: Arb execution pause (prevents inventory race condition)
         self._arb_paused_markets: set = set()  # Markets paused during arb execution
         self._arb_pause_expiry: Dict[str, float] = {}  # Auto-resume after timeout
@@ -582,11 +635,12 @@ class MarketMakingStrategy(BaseStrategy):
         logger.info(
             f"MarketMakingStrategy initialized - "
             f"Capital: ${self._allocated_capital}, "
-            f"Max markets: {MM_MAX_ACTIVE_MARKETS}, "
+            f"Max markets: {MM_MAX_MARKETS} (Adaptive Filtering), "
             f"Target spread: {MM_TARGET_SPREAD*100:.1f}%, "
             f"Min depth: {MM_MIN_DEPTH_SHARES} shares, "
             f"Min liquidity depth: ${MM_MIN_LIQUIDITY_DEPTH}, "
-            f"Min volume: ${MM_MIN_MARKET_VOLUME_24H}/day, "
+            f"Volume Multiplier: {MM_VOLUME_MULTIPLIER}x (position < 5% of daily volume), "
+            f"Hard Floor Volume: ${MM_HARD_FLOOR_VOLUME}/day, "
             f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}, "
             f"Z-Score Alpha: ENABLED (±{Z_SCORE_ENTRY_THRESHOLD:.1f}σ entry, "
             f"${MM_Z_SENSITIVITY:.4f}/σ sensitivity)"
@@ -648,6 +702,72 @@ class MarketMakingStrategy(BaseStrategy):
         expiry = self._arb_pause_expiry.get(market_id, 0)
         if time.time() > expiry:
             logger.warning(
+                f"[MM_PAUSE] ⏰ Timeout expired for {market_id[:8]}... "
+                f"- auto-resuming quoting"
+            )
+            self._arb_paused_markets.discard(market_id)
+            self._arb_pause_expiry.pop(market_id, None)
+            return False
+        
+        return True
+    
+    def _calculate_dynamic_min_volume(self) -> Decimal:
+        """
+        Calculate dynamic minimum volume threshold based on current capital allocation
+        
+        ADAPTIVE CAPACITY FILTERING (2026 Institutional Standard)
+        ══════════════════════════════════════════════════════════════════════════════════
+        
+        Formula:
+            Target_Position_Size = Current_Balance / MM_MAX_MARKETS
+            Dynamic_Min_Volume = max(Target_Position_Size * MM_VOLUME_MULTIPLIER, MM_HARD_FLOOR_VOLUME)
+        
+        Rationale:
+            - Ensures position size < 5% of daily volume (market impact limit)
+            - Prevents capital fragmentation across too many thin markets
+            - Scales automatically as account balance grows
+            - Hard floor prevents quoting in "dead" markets (< $50/day)
+        
+        Example (Institutional-Grade):
+            Balance: $80 (80% of $100 principal deployed)
+            Target_Position: $80 / 5 markets = $16 per market
+            Dynamic_Min_Volume: max($16 * 20, $50) = max($320, $50) = $320/day
+            
+            Market Impact Check:
+                $16 position / $320 daily volume = 5% (acceptable)
+                
+        Example (Small Account):
+            Balance: $10 (only $10 deployed)
+            Target_Position: $10 / 5 markets = $2 per market
+            Dynamic_Min_Volume: max($2 * 20, $50) = max($40, $50) = $50/day (hard floor kicks in)
+        
+        Returns:
+            Decimal: Dynamic minimum volume threshold in USDC
+        """
+        # Step A: Get current available balance from allocated capital
+        # Use Decimal for precise financial calculations
+        current_balance = Decimal(str(self._allocated_capital))
+        
+        # Step B: Calculate target position size per market
+        max_markets = Decimal(str(MM_MAX_MARKETS))
+        target_position_size = current_balance / max_markets
+        
+        # Step C: Calculate dynamic minimum volume
+        volume_multiplier = Decimal(str(MM_VOLUME_MULTIPLIER))
+        calculated_threshold = target_position_size * volume_multiplier
+        
+        # Step D: Apply hard floor (safety guard)
+        hard_floor = Decimal(str(MM_HARD_FLOOR_VOLUME))
+        dynamic_min_volume = max(calculated_threshold, hard_floor)
+        
+        logger.debug(
+            f"[ADAPTIVE FILTER] Balance: ${current_balance:.2f}, "
+            f"Target/Market: ${target_position_size:.2f}, "
+            f"Dynamic Threshold: ${dynamic_min_volume:.2f}/day "
+            f"({'hard floor' if dynamic_min_volume == hard_floor else 'calculated'})"
+        )
+        
+        return dynamic_min_volume
                 f"[MM_PAUSE_TIMEOUT] Auto-resuming {market_id[:8]}... "
                 f"(arb pause exceeded 1.5s timeout)"
             )
@@ -1126,13 +1246,18 @@ class MarketMakingStrategy(BaseStrategy):
                 eligible,
                 key=lambda m: m.get('volume24hr', 0),
                 reverse=True
-            )[:MM_MAX_ACTIVE_MARKETS * 3]
+            )[:MM_MAX_MARKETS * 3]
+            
+            # Calculate current dynamic threshold for logging transparency
+            dynamic_threshold = self._calculate_dynamic_min_volume()
             
             logger.info(
                 f"📊 MARKET MAKING ELIGIBILITY (scanned {len(all_markets)} markets):\n"
+                f"   ADAPTIVE FILTER: Dynamic Min Volume = ${dynamic_threshold:.2f}/day\n"
+                f"   (Balance: ${self._allocated_capital:.2f} / {MM_MAX_MARKETS} markets × {MM_VOLUME_MULTIPLIER}x, floor: ${MM_HARD_FLOOR_VOLUME})\n"
                 f"   ❌ Not binary: {rejection_stats['not_binary']}\n"
                 f"   ❌ Low liquidity depth (<${MM_MIN_LIQUIDITY_DEPTH}): {rejection_stats['low_liquidity']}\n"
-                f"   ❌ Low volume (<${MM_MIN_MARKET_VOLUME_24H}): {rejection_stats['low_volume']}\n"
+                f"   ❌ Low volume (<${dynamic_threshold:.2f}): {rejection_stats['low_volume']}\n"
                 f"   ❌ Inactive/closed: {rejection_stats['inactive']}\n"
                 f"   ❌ NegRisk: {rejection_stats.get('negrisk', 0)} (NOW ENABLED - was filtered before)\n"
                 f"   ❌ Not accepting orders: {rejection_stats['not_accepting_orders']}\n"
@@ -1151,9 +1276,20 @@ class MarketMakingStrategy(BaseStrategy):
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return (False, 'not_binary')
         
-        # Volume threshold
-        volume_24h = market.get('volume24hr', 0)
-        if volume_24h < MM_MIN_MARKET_VOLUME_24H:
+        # ADAPTIVE VOLUME THRESHOLD (2026 Institutional Standard)
+        # Dynamic calculation based on current capital allocation
+        volume_24h = Decimal(str(market.get('volume24hr', 0)))
+        dynamic_min_volume = self._calculate_dynamic_min_volume()
+        
+        if volume_24h < dynamic_min_volume:
+            # Enhanced logging for transparency
+            ticker = market.get('ticker', market.get('question', 'Unknown')[:30])
+            logger.debug(
+                f"Market {ticker} rejected. "
+                f"Volume ${volume_24h:.2f} is below Dynamic Threshold ${dynamic_min_volume:.2f} "
+                f"(calculated from ${self._allocated_capital:.2f} balance, "
+                f"{MM_MAX_MARKETS} max markets, {MM_VOLUME_MULTIPLIER}x multiplier)"
+            )
             return (False, 'low_volume')
         
         # Active market check
@@ -1179,8 +1315,9 @@ class MarketMakingStrategy(BaseStrategy):
     def _is_market_eligible(self, market: Dict[str, Any]) -> bool:
         """Check if market meets criteria for market making
         
-        DISCOVERY MODE: Ultra-permissive - accept EITHER volume OR liquidity
-        Previous: Required BOTH (too strict - found 0 markets)
+        ADAPTIVE CAPACITY FILTERING: Dynamic volume thresholds
+        Previous: Static $15k/day threshold (too rigid)
+        Current: Calculated based on available capital allocation
         """
         # Binary market check
         tokens = market.get('tokens', [])
@@ -1191,13 +1328,15 @@ class MarketMakingStrategy(BaseStrategy):
         if market.get('closed', False) or not market.get('active', True):
             return False
         
-        # DISCOVERY MODE: Accept if EITHER criterion met
-        liquidity = market.get('liquidity', 0)
-        volume_24h = market.get('volume24hr', 0)
+        # ADAPTIVE FILTERING: Calculate dynamic threshold
+        liquidity = Decimal(str(market.get('liquidity', 0)))
+        volume_24h = Decimal(str(market.get('volume24hr', 0)))
+        dynamic_min_volume = self._calculate_dynamic_min_volume()
         
-        has_liquidity = liquidity >= MM_MIN_LIQUIDITY_DEPTH
-        has_volume = volume_24h >= MM_MIN_MARKET_VOLUME_24H
+        has_liquidity = liquidity >= Decimal(str(MM_MIN_LIQUIDITY_DEPTH))
+        has_volume = volume_24h >= dynamic_min_volume
         
+        # Accept if EITHER criterion met (discovery mode)
         if not (has_liquidity or has_volume):
             return False
         
@@ -1209,8 +1348,8 @@ class MarketMakingStrategy(BaseStrategy):
     
     async def _manage_positions(self) -> None:
         """Manage active positions"""
-        # Add new markets if below capacity
-        while len(self._positions) < MM_MAX_ACTIVE_MARKETS:
+        # Add new markets if below capacity (use MM_MAX_MARKETS for institutional standard)
+        while len(self._positions) < MM_MAX_MARKETS:
             new_market = await self._select_next_market()
             if not new_market:
                 break
@@ -1570,6 +1709,71 @@ class MarketMakingStrategy(BaseStrategy):
                             f"✅ Mean Reversion Signal ACTIVE: Z={z_score:.2f}σ → "
                             f"shift=${alpha_shift:+.4f} ({direction})"
                         )
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # TOXIC FLOW FILTER (2026 HYBRID UPGRADE)
+        # ═══════════════════════════════════════════════════════════════════
+        # If Z-Score mean reversion conflicts with OBI momentum, PAUSE quoting
+        # Prevents providing liquidity to informed traders during breakouts
+        #
+        # Logic: If |Z-Score| > 2.0 AND OBI is trending AGAINST the reversion → PAUSE
+        # Example 1: Z = +2.5 (overbought, expect DOWN) BUT OBI > 0.6 (heavy buying) → TOXIC
+        # Example 2: Z = -2.5 (oversold, expect UP) BUT OBI < -0.6 (heavy selling) → TOXIC
+        
+        if market_id not in self._toxic_flow_paused:
+            z_manager = self._z_score_managers.get(market_id)
+            if z_manager and z_manager.is_signal_active():
+                z_score = z_manager.get_z_score()
+                
+                # Get OBI from market snapshot
+                primary_token = position.token_ids[0]
+                snapshot = self._market_data_manager.cache.get(primary_token) if self._market_data_manager else None
+                
+                if snapshot and hasattr(snapshot, 'obi'):
+                    obi = snapshot.obi
+                    
+                    # Check for Z-Score vs OBI conflict (toxic flow)
+                    # Z > 2.0 (overbought → expect DOWN) but OBI > 0.6 (heavy buying)
+                    is_toxic_upward = (z_score > Z_SCORE_ENTRY_THRESHOLD and obi > MM_OBI_THRESHOLD)
+                    
+                    # Z < -2.0 (oversold → expect UP) but OBI < -0.6 (heavy selling)
+                    is_toxic_downward = (z_score < -Z_SCORE_ENTRY_THRESHOLD and obi < -MM_OBI_THRESHOLD)
+                    
+                    if is_toxic_upward or is_toxic_downward:
+                        # PAUSE quoting for this market
+                        pause_until = time.time() + MM_MOMENTUM_PROTECTION_TIME
+                        self._toxic_flow_paused[market_id] = pause_until
+                        
+                        direction = "UPWARD" if is_toxic_upward else "DOWNWARD"
+                        logger.critical(
+                            f"🚨 TOXIC FLOW DETECTED: {market_id[:8]}... - "
+                            f"{direction} breakout (Z={z_score:+.2f}σ, OBI={obi:+.2f}) - "
+                            f"PAUSING quotes for {MM_MOMENTUM_PROTECTION_TIME}s to avoid informed traders"
+                        )
+                        
+                        # Cancel all existing quotes
+                        for order_id in list(position.active_bids.values()) + list(position.active_asks.values()):
+                            try:
+                                await self.client.cancel_order(order_id)
+                            except:
+                                pass
+                        position.active_bids.clear()
+                        position.active_asks.clear()
+                        return
+        
+        # Check if toxic flow pause is active
+        if market_id in self._toxic_flow_paused:
+            pause_end = self._toxic_flow_paused[market_id]
+            if time.time() < pause_end:
+                logger.debug(
+                    f"⏸️ TOXIC FLOW PAUSE active for {market_id[:8]}... - "
+                    f"Resuming in {pause_end - time.time():.0f}s"
+                )
+                return
+            else:
+                # Pause expired - resume normal quoting
+                logger.info(f"✅ TOXIC FLOW PAUSE ended for {market_id[:8]}... - Resuming quotes")
+                del self._toxic_flow_paused[market_id]
         
         # CRITICAL: Check for toxic flow (being run over)
         is_toxic = position.check_toxic_flow()

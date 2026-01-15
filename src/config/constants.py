@@ -551,15 +551,41 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 
 # Market Selection
 # -----------------
-# Minimum 24h volume to consider for market making (USD)
-# INSTITUTIONAL HFT STANDARD: $25,000/day minimum (Tier-1 markets only)
+# ADAPTIVE CAPACITY FILTERING (2026 Institutional Standard)
+# Dynamic volume thresholds based on available capital allocation
 # Rationale:
-#   - Ensures sufficient noise-to-signal ratio for maker profitability
-#   - Filters out low-activity markets prone to adverse selection
-#   - Targets liquid order books where spreads are tightest (0.5-2%)
-#   - Reduces toxic flow exposure from informed traders in thin markets
-# Expected: 100-200 Tier-1 markets (vs 1000+ total Polymarket markets)
-MM_MIN_MARKET_VOLUME_24H: Final[float] = 15000.0  # HFT institutional: Lower threshold for $100 principal
+#   - Static thresholds ($15k/day) ignore current bankroll size
+#   - Adaptive filtering ensures position size < 5% of daily volume
+#   - Prevents capital fragmentation across too many markets
+#   - Scales automatically as account grows
+
+# Maximum concurrent markets (capital allocation limit)
+# INSTITUTIONAL STANDARD: 5 markets max for $100 principal
+# Rationale:
+#   - Concentrates capital in highest-quality opportunities
+#   - Each market receives 20% of allocated capital ($80 / 5 = $16 per market)
+#   - Prevents over-diversification with small account
+#   - Easier to monitor 5 positions vs 10+
+MM_MAX_MARKETS: Final[int] = 5
+
+# Volume multiplier for dynamic threshold calculation
+# INSTITUTIONAL STANDARD: 20.0 (position size < 5% of daily volume)
+# Formula: Dynamic_Min_Volume = (Balance / MM_MAX_MARKETS) * MM_VOLUME_MULTIPLIER
+# Rationale:
+#   - Ensures our position won't move market significantly
+#   - 1 / 0.05 = 20 (inverse of 5% market impact threshold)
+#   - Example: $16 position requires $320/day minimum volume (16 * 20)
+#   - Prevents quoting in thin markets where we ARE the market
+MM_VOLUME_MULTIPLIER: Final[float] = 20.0
+
+# Hard floor volume threshold (absolute minimum)
+# INSTITUTIONAL STANDARD: $50/day minimum
+# Rationale:
+#   - Prevents quoting in "dead" markets with < $50/day volume
+#   - Even with $10 account, still require $50/day minimum
+#   - Safety guard against market microstructure breakdown
+#   - Takes precedence when Dynamic_Min_Volume < $50
+MM_HARD_FLOOR_VOLUME: Final[float] = 50.0
 
 # Minimum liquidity depth within 2% of mid-price (USD)
 # INSTITUTIONAL HFT STANDARD: $500 minimum depth per side
@@ -585,12 +611,10 @@ MM_MAX_SPREAD_PERCENT: Final[float] = 0.07  # 7% max spread
 MM_PREFER_BINARY_MARKETS: Final[bool] = True
 
 # Maximum number of markets to make simultaneously
-# INSTITUTIONAL HFT STANDARD: 10 markets max
-# Rationale:
-#   - Concentrates capital in highest-conviction, highest-volume opportunities
-#   - Allows proper risk monitoring per market (diversification without dilution)
-#   - Limits operational complexity (order management, inventory tracking)
-#   - Balances portfolio correlation risk (10 markets = acceptable cross-exposure)
+# DEPRECATED: Use MM_MAX_MARKETS for capital allocation limit (5 markets)
+# This constant (10) is kept for backward compatibility but should be
+# replaced by MM_MAX_MARKETS in production code for proper capital allocation
+# Note: Adaptive filtering uses MM_MAX_MARKETS (5) as the authoritative limit
 MM_MAX_ACTIVE_MARKETS: Final[int] = 10
 
 
@@ -697,6 +721,7 @@ MM_MAX_DIRECTIONAL_EXPOSURE_PER_MARKET: Final[float] = 15.0
 #   - For $100 accounts: 0.50 ensures inventory skew exceeds 1-cent tick minimum
 #   - Forces offload after 2-3 fills, preventing capital lock-up
 # Formula: spread_skew = gamma × inventory_imbalance × volatility
+# Note: Also referenced as MM_INVENTORY_RISK_GAMMA for OBI integration
 MM_GAMMA_RISK_AVERSION: Final[float] = 0.50
 
 # Boundary risk thresholds for Bernoulli variance mode
@@ -784,6 +809,78 @@ MM_Z_SENSITIVITY: Final[float] = 0.005
 #   - More frequent updates (10s) = unstable Z-Score (not enough price discovery)
 #   - Less frequent updates (300s) = stale signal, missed opportunities
 Z_SCORE_UPDATE_INTERVAL: Final[int] = 60
+
+
+# ============================================================================
+# ORDER BOOK IMBALANCE (OBI) - MOMENTUM OVERLAY (2026 HYBRID UPGRADE)
+# ============================================================================
+# Institutional-grade order flow analytics to prevent adverse selection
+
+# OBI threshold for significant imbalance detection
+# INSTITUTIONAL STANDARD: 0.6 (60% weighted toward one side)
+# Formula: OBI = (Bid_Size - Ask_Size) / (Bid_Size + Ask_Size)
+# Rationale:
+#   - OBI > 0.6 = Heavy buying pressure (price likely to rise)
+#   - OBI < -0.6 = Heavy selling pressure (price likely to fall)
+#   - Used to shift reservation price by 1 tick to avoid being 'picked off'
+MM_OBI_THRESHOLD: Final[float] = 0.6
+
+# Momentum protection cooldown (seconds)
+# INSTITUTIONAL STANDARD: 30 seconds
+# Rationale:
+#   - When Z-Score mean reversion conflicts with OBI momentum (toxic flow)
+#   - Pause quoting to avoid providing liquidity to informed traders
+#   - Prevents being 'run over' during news-driven price discovery
+#   - Resume after 30s when initial momentum wave subsides
+MM_MOMENTUM_PROTECTION_TIME: Final[int] = 30
+
+# Inventory risk gamma (Avellaneda-Stoikov)
+# INSTITUTIONAL STANDARD: 0.5 (calibrated for $100 principal)
+# Rationale:
+#   - Controls exponential inventory penalty: spread_skew = gamma × q × σ²
+#   - Higher gamma = more aggressive inventory offload (wider spreads when skewed)
+#   - For $100 accounts: 0.5 ensures inventory penalty exceeds 1-cent tick
+#   - Forces offload after 2-3 fills, preventing capital lock-up
+# Note: Same as MM_GAMMA_RISK_AVERSION but explicit for clarity
+MM_INVENTORY_RISK_GAMMA: Final[float] = 0.5
+
+# Convex inventory risk coefficient (2026 Institution-Grade Risk Hardening)
+# INSTITUTIONAL STANDARD: 2.0 (exponential escalation factor)
+# Rationale:
+#   - When abs(inventory) > 0.7 × MAX_INVENTORY, apply exponential multiplier
+#   - Prevents "inventory pinning" where last 20% capacity costs same as first 20%
+#   - Formula: skew = base_skew × exp(COEFFICIENT × overage_ratio)
+#   - Example: At 80% inventory → multiplier = exp(2.0 × 0.1/0.3) ≈ 1.95x penalty
+#   - Forces aggressive unwinding before hitting hard limits
+MM_CONVEX_RISK_COEFFICIENT: Final[float] = 2.0
+
+# Toxic flow detection (Anti-Sniping Protection - 2026 HFT Standard)
+# INSTITUTIONAL STANDARD: 5 fills in 10 seconds
+# Rationale:
+#   - Detects informed order flow attempting to drain liquidity
+#   - If bot receives >5 fills in 10s without favorable price movement → PAUSE
+#   - Triggers 30-second cooldown to avoid being "picked off" during news events
+#   - Protects against coordinated sniping attacks
+MM_TOXIC_VELOCITY_THRESHOLD: Final[int] = 5  # Max fills in 10s window
+MM_TOXIC_FLOW_WINDOW: Final[int] = 10  # Time window in seconds
+MM_TOXIC_FLOW_COOLDOWN: Final[int] = 30  # Pause duration in seconds
+
+# EWMA volatility calculation (RiskMetrics Standard)
+# INSTITUTIONAL STANDARD: 0.94 (94% decay factor)
+# Rationale:
+#   - Exponentially Weighted Moving Average reacts faster than simple rolling std dev
+#   - Lambda = 0.94 gives ~75% weight to last 20 observations (industry standard)
+#   - Allows bot to "feel" volatility spikes instantly and widen spreads
+#   - Formula: EWMA(t) = λ × EWMA(t-1) + (1-λ) × return²(t)
+MM_VOL_DECAY_LAMBDA: Final[float] = 0.94
+
+# Minimum tick size (Polymarket standard)
+# INSTITUTIONAL STANDARD: 0.01 (1 cent minimum)
+# Rationale:
+#   - Polymarket's minimum price increment
+#   - Used for zero-cross spread protection
+#   - Prevents bid >= ask in extreme skew scenarios
+MM_MIN_TICK_SIZE: Final[float] = 0.01
 
 
 # Order Management

@@ -55,7 +55,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class MarketSnapshot:
-    """Real-time market data snapshot"""
+    """Real-time market data snapshot with OBI (Order Book Imbalance)"""
     asset_id: str
     best_bid: float
     best_ask: float
@@ -63,6 +63,7 @@ class MarketSnapshot:
     ask_size: float
     mid_price: float
     micro_price: float  # Volume-weighted mid
+    obi: float  # Order Book Imbalance: (bid_size - ask_size) / (bid_size + ask_size)
     last_update: float  # Unix timestamp
     bids: List[Dict[str, Any]] = field(default_factory=list)
     asks: List[Dict[str, Any]] = field(default_factory=list)
@@ -88,6 +89,7 @@ class MarketSnapshot:
             'ask_size': self.ask_size,
             'mid_price': self.mid_price,
             'micro_price': self.micro_price,
+            'obi': self.obi,
             'last_update': self.last_update,
             'bids': self.bids,
             'asks': self.asks,
@@ -586,6 +588,67 @@ class PolymarketWSManager:
                 else:
                     micro_price = mid_price
                 
+                # ═══════════════════════════════════════════════════════════════════
+                # WEIGHTED ORDER BOOK IMBALANCE (OBI) - 2026 HFT INSTITUTIONAL UPGRADE
+                # ═══════════════════════════════════════════════════════════════════
+                # OLD (Simple Volume Ratio): OBI = (bid_vol - ask_vol) / (bid_vol + ask_vol)
+                # Problem: Massive "wall" 10 ticks away skews signal as much as best bid/ask
+                #
+                # NEW (Distance-Weighted Decay): Weight = Volume / Distance²
+                # Rationale: Liquidity far from mid has exponentially less price impact
+                # Formula: OBI = (Weighted_Bid_Vol - Weighted_Ask_Vol) / Total_Weighted_Vol
+                # ═══════════════════════════════════════════════════════════════════
+                
+                from decimal import Decimal
+                
+                weighted_bid_vol = Decimal('0')
+                weighted_ask_vol = Decimal('0')
+                
+                # Process top 10 levels with distance-weighted decay
+                for bid_level in bids[:10]:
+                    bid_price_dec = Decimal(str(bid_level['price']))
+                    bid_size_dec = Decimal(str(bid_level['size']))
+                    distance_from_mid = abs(Decimal(str(mid_price)) - bid_price_dec)
+                    
+                    # Avoid division by zero (if bid == mid, use small epsilon)
+                    if distance_from_mid < Decimal('0.0001'):
+                        distance_from_mid = Decimal('0.0001')
+                    
+                    # Weight = Volume / Distance²
+                    weight = bid_size_dec / (distance_from_mid ** 2)
+                    weighted_bid_vol += weight
+                
+                for ask_level in asks[:10]:
+                    ask_price_dec = Decimal(str(ask_level['price']))
+                    ask_size_dec = Decimal(str(ask_level['size']))
+                    distance_from_mid = abs(Decimal(str(mid_price)) - ask_price_dec)
+                    
+                    if distance_from_mid < Decimal('0.0001'):
+                        distance_from_mid = Decimal('0.0001')
+                    
+                    weight = ask_size_dec / (distance_from_mid ** 2)
+                    weighted_ask_vol += weight
+                
+                # Calculate weighted OBI
+                total_weighted_vol = weighted_bid_vol + weighted_ask_vol
+                if total_weighted_vol > 0:
+                    obi = float((weighted_bid_vol - weighted_ask_vol) / total_weighted_vol)
+                else:
+                    obi = 0.0
+                
+                # Log first calculation for transparency
+                if not hasattr(self, '_obi_logged'):
+                    self._obi_logged = set()
+                
+                if asset_id not in self._obi_logged:
+                    logger.info(
+                        f"[WEIGHTED OBI] {asset_id[:8]}... - "
+                        f"Weighted: {obi:+.3f} (bid_weight={float(weighted_bid_vol):.2f}, "
+                        f"ask_weight={float(weighted_ask_vol):.2f}) - "
+                        f"Distance-decay ensures nearby liquidity dominates signal"
+                    )
+                    self._obi_logged.add(asset_id)
+                
                 # Create snapshot
                 snapshot = MarketSnapshot(
                     asset_id=asset_id,
@@ -595,6 +658,7 @@ class PolymarketWSManager:
                     ask_size=ask_size,
                     mid_price=mid_price,
                     micro_price=micro_price,
+                    obi=obi,
                     last_update=time.time(),
                     bids=bids[:10],  # Keep top 10 levels
                     asks=asks[:10],
