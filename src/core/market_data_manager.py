@@ -560,21 +560,24 @@ class PolymarketWSManager:
                 data = json.loads(message)
                 
                 # Route message to appropriate queue
-                msg_type = data.get('type') or data.get('event_type')
+                # Per Polymarket support: messages use 'event_type' field
+                event_type = data.get('event_type') or data.get('type')
                 
-                if msg_type in ['book', 'last_trade_price', 'orderbook_delta']:
+                # Market channel events: book, price_change, last_trade_price
+                if event_type in ['book', 'price_change', 'last_trade_price']:
                     # Order book update
                     try:
                         self._orderbook_queue.put_nowait(data)
                     except asyncio.QueueFull:
                         logger.warning("Orderbook queue full - dropping message")
                         
-                elif msg_type in ['fill', 'order_filled', 'trade']:
-                    # Fill event
+                # User channel events: order (with type: PLACEMENT/UPDATE/CANCELLATION)
+                elif event_type == 'order':
+                    # Order event (placement, update, cancellation, fill)
                     try:
                         self._fill_queue.put_nowait(data)
                     except asyncio.QueueFull:
-                        logger.warning("Fill queue full - dropping message")
+                        logger.warning("Order event queue full - dropping message")
                 
                 else:
                     logger.debug(f"Unknown message type: {msg_type}")
@@ -603,9 +606,10 @@ class PolymarketWSManager:
                 if not asset_id:
                     continue
                 
-                # Extract bids/asks
-                bids = data.get('bids', [])
-                asks = data.get('asks', [])
+                # Extract order book data
+                # Per Polymarket support: book events use 'buys' and 'sells' (not bids/asks)
+                bids = data.get('buys', data.get('bids', []))  # Try 'buys' first, fallback to 'bids'
+                asks = data.get('sells', data.get('asks', []))  # Try 'sells' first, fallback to 'asks'
                 
                 if not bids or not asks:
                     continue
@@ -733,41 +737,56 @@ class PolymarketWSManager:
                 logger.error(f"Market update handler error ({name}): {e}", exc_info=True)
     
     async def _fill_processor(self) -> None:
-        """Process fill events and dispatch to strategies"""
+        """Process order events and dispatch to strategies"""
         while self._is_running:
             try:
                 data = await self._fill_queue.get()
                 
-                # Parse fill event
-                fill = FillEvent(
-                    order_id=data.get('order_id', ''),
-                    client_id=data.get('client_id'),
-                    asset_id=data.get('asset_id', ''),
-                    side=data.get('side', ''),
-                    price=float(data.get('price', 0)),
-                    size=float(data.get('size', 0)),
-                    timestamp=time.time(),
-                    market_id=data.get('market_id'),
-                )
+                # Per Polymarket support: user channel sends event_type="order" 
+                # with type field (PLACEMENT/UPDATE/CANCELLATION) and size_matched for fills
+                event_type = data.get('event_type')
+                order_type = data.get('type', '')  # PLACEMENT, UPDATE, CANCELLATION
                 
-                logger.info(
-                    f"[FILL] {fill.side} {fill.size:.1f} @ {fill.price:.4f} "
-                    f"(order: {fill.order_id[:8]}...)"
-                )
-                
-                # Dispatch to all registered handlers
-                for strategy_name, handler in self._fill_handlers.items():
-                    try:
-                        # Call handler asynchronously
-                        if asyncio.iscoroutinefunction(handler):
-                            await handler(fill)
-                        else:
-                            handler(fill)
-                    except Exception as e:
-                        logger.error(
-                            f"Fill handler error ({strategy_name}): {e}",
-                            exc_info=True
-                        )
+                # Only process filled orders (size_matched > 0)
+                size_matched = float(data.get('size_matched', 0))
+                if event_type == 'order' and size_matched > 0:
+                    # Parse fill event from order event
+                    fill = FillEvent(
+                        order_id=data.get('id', ''),  # Support uses 'id' not 'order_id'
+                        client_id=data.get('client_id'),
+                        asset_id=data.get('asset_id', ''),
+                        side=data.get('side', ''),
+                        price=float(data.get('price', 0)),
+                        size=size_matched,  # Use size_matched for filled amount
+                        timestamp=float(data.get('timestamp', time.time())),
+                        market_id=data.get('market'),  # Support uses 'market' not 'market_id'
+                    )
+                    
+                    logger.info(
+                        f\"[FILL] {fill.side} {fill.size:.1f} @ {fill.price:.4f} \"
+                        f\"(order: {fill.order_id[:8]}..., type: {order_type})\"
+                    )
+                    
+                    # Dispatch to all registered handlers
+                    for strategy_name, handler in self._fill_handlers.items():
+                        try:
+                            # Call handler asynchronously
+                            if asyncio.iscoroutinefunction(handler):
+                                await handler(fill)
+                            else:
+                                handler(fill)
+                        except Exception as e:
+                            logger.error(
+                                f\"Fill handler error ({strategy_name}): {e}\",
+                                exc_info=True
+                            )
+                else:
+                    # Log non-fill order events at debug level
+                    logger.debug(
+                        f\"Order event: {order_type}, \"
+                        f\"asset: {data.get('asset_id', '')[:8]}..., \"
+                        f\"size_matched: {size_matched}\"
+                    )
                 
             except asyncio.CancelledError:
                 break
@@ -803,11 +822,11 @@ class PolymarketWSManager:
                 continue
             
             try:
-                # Polymarket WebSocket subscription format
+                # Polymarket WebSocket subscription format (per support: Jan 2026)
+                # Correct format: {"type":"market","assets_ids":[tokenId]}
                 subscribe_msg = {
-                    "type": "subscribe",
-                    "channel": "orderbook",
-                    "asset_id": asset_id,
+                    "type": "market",
+                    "assets_ids": [asset_id],
                 }
                 
                 await self._ws.send(json.dumps(subscribe_msg))
@@ -824,18 +843,20 @@ class PolymarketWSManager:
             return
         
         try:
-            # Subscribe to user's order fills
+            # Subscribe to user's order events (per support: requires apiKey, secret, passphrase)
+            # Note: User channel auth format from Polymarket support (Jan 2026)
             subscribe_msg = {
-                "type": "subscribe",
-                "channel": "user",
+                "type": "user",
+                "markets": [],  # Empty array = subscribe to all markets
                 "auth": {
-                    "address": self.client.get_address(),
-                    # Add signature if required
+                    "apiKey": self.client.api_key,
+                    "secret": self.client.api_secret,
+                    "passphrase": self.client.api_passphrase,
                 }
             }
             
             await self._ws.send(json.dumps(subscribe_msg))
-            logger.info("Subscribed to user fill channel")
+            logger.info("Subscribed to user order channel")
             
         except Exception as e:
             logger.error(f"User channel subscription error: {e}")
