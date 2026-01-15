@@ -39,6 +39,7 @@ Does NOT interfere with arbitrage execution.
 
 from typing import Dict, Any, Optional, List, Tuple
 import asyncio
+import aiohttp
 from datetime import datetime, timedelta
 from decimal import Decimal
 import time
@@ -1471,34 +1472,45 @@ class MarketMakingStrategy(BaseStrategy):
         logger.debug("Scanning for eligible market making opportunities...")
         
         try:
-            # DISCOVERY MODE: Fetch markets with pagination (10 pages = 1000 markets)
-            # Previous: 5 pages (500 markets) - not enough to find eligible markets
+            # GAMMA API: Fetch markets with volume/liquidity data
+            # Per Polymarket Support: CLOB client.get_markets() doesn't include volume/liquidity
+            # Use Gamma API directly: https://gamma-api.polymarket.com/markets
             all_markets = []
             next_cursor = None
-            max_pages = 10  # Increased from 5 to find more opportunities
+            max_pages = 10  # Fetch up to 1000 markets
             
-            for page in range(max_pages):
-                if next_cursor == 'END':  # No more results
-                    break
-                
-                # CRITICAL: Use API filters to reduce network overhead
-                response = await self.client.get_markets(
-                    next_cursor=next_cursor,
-                    # volume_num_min=10,  # DISABLED: API parameter not working (2026)
-                    # liquidity_num_min=20  # DISABLED: API parameter not working (2026)
-                )
-                page_markets = response.get('data', [])
-                
-                if not page_markets:
-                    break
-                
-                all_markets.extend(page_markets)
-                next_cursor = response.get('next_cursor', 'END')
-                
-                logger.debug(f"Fetched page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
+            # Import at runtime to avoid circular dependency
+            from src.config.constants import POLYMARKET_GAMMA_API_URL
             
-            logger.debug(f"Total markets fetched: {len(all_markets)}")
+            async with aiohttp.ClientSession() as session:
+                for page in range(max_pages):
+                    if next_cursor == 'END':
+                        break
+                    
+                    # Build Gamma API URL
+                    url = f"{POLYMARKET_GAMMA_API_URL}/markets"
+                    params = {'active': 'true'}  # Only active markets
+                    if next_cursor:
+                        params['next_cursor'] = next_cursor
+                    
+                    # Fetch from Gamma API
+                    async with session.get(url, params=params, timeout=10) as resp:
+                        if resp.status != 200:
+                            logger.error(f"Gamma API error: {resp.status}")
+                            break
+                        
+                        response = await resp.json()
+                        page_markets = response.get('data', [])
+                        
+                        if not page_markets:
+                            break
+                        
+                        all_markets.extend(page_markets)
+                        next_cursor = response.get('next_cursor', 'END')
+                        
+                        logger.debug(f"Fetched Gamma API page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
             
+            logger.debug(f"Total markets fetched from Gamma API: {len(all_markets)}")
             # DEBUG: Track rejection reasons
             rejection_stats = {
                 'not_binary': 0,
@@ -1571,12 +1583,12 @@ class MarketMakingStrategy(BaseStrategy):
         - Validate minimum_tick_size and minimum_order_size
         - Require actual volume data (skip markets with null volume)
         """
-        # DEBUG: Log first market to see actual API structure
+        # DEBUG: Log first market to see Gamma API structure
         if not hasattr(self, '_debug_logged_first_market'):
             self._debug_logged_first_market = True
-            logger.info(f"🔍 DEBUG FIRST MARKET: {market.get('question', 'N/A')[:50]}")
+            logger.info(f"🔍 DEBUG GAMMA API FIRST MARKET: {market.get('question', 'N/A')[:50]}")
             logger.info(f"🔍 Available fields: {sorted(market.keys())}")
-            logger.info(f"🔍 volumeNum={market.get('volumeNum')}, volume24hr={market.get('volume24hr')}, volume={market.get('volume')}")
+            logger.info(f"🔍 volumeNum={market.get('volumeNum')}, volume24hr={market.get('volume24hr')}")
             logger.info(f"🔍 liquidityNum={market.get('liquidityNum')}, liquidity={market.get('liquidity')}")
             logger.info(f"🔍 enableOrderBook={market.get('enableOrderBook')}, active={market.get('active')}, closed={market.get('closed')}")
         
