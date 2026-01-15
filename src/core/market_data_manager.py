@@ -763,8 +763,8 @@ class PolymarketWSManager:
                     )
                     
                     logger.info(
-                        f\"[FILL] {fill.side} {fill.size:.1f} @ {fill.price:.4f} \"
-                        f\"(order: {fill.order_id[:8]}..., type: {order_type})\"
+                        f"[FILL] {fill.side} {fill.size:.1f} @ {fill.price:.4f} "
+                        f"(order: {fill.order_id[:8]}..., type: {order_type})"
                     )
                     
                     # Dispatch to all registered handlers
@@ -777,15 +777,15 @@ class PolymarketWSManager:
                                 handler(fill)
                         except Exception as e:
                             logger.error(
-                                f\"Fill handler error ({strategy_name}): {e}\",
+                                f"Fill handler error ({strategy_name}): {e}",
                                 exc_info=True
                             )
                 else:
                     # Log non-fill order events at debug level
                     logger.debug(
-                        f\"Order event: {order_type}, \"
-                        f\"asset: {data.get('asset_id', '')[:8]}..., \"
-                        f\"size_matched: {size_matched}\"
+                        f"Order event: {order_type}, "
+                        f"asset: {data.get('asset_id', '')[:8]}..., "
+                        f"size_matched: {size_matched}"
                     )
                 
             except asyncio.CancelledError:
