@@ -913,17 +913,15 @@ class MarketMakingStrategy(BaseStrategy):
         self._arb_pause_expiry: Dict[str, float] = {}  # Auto-resume after timeout
         
         logger.info(
-            f"MarketMakingStrategy initialized - "
+            f"🎯 MarketMakingStrategy initialized [NEW CODE v2.0] - "
             f"Capital: ${self._allocated_capital}, "
-            f"Max markets: {MM_MAX_MARKETS} (Adaptive Filtering), "
+            f"Max markets: {MM_MAX_MARKETS}, "
             f"Target spread: {MM_TARGET_SPREAD*100:.1f}%, "
             f"Min depth: {MM_MIN_DEPTH_SHARES} shares, "
             f"Min liquidity depth: ${MM_MIN_LIQUIDITY_DEPTH}, "
-            f"Volume Multiplier: {MM_VOLUME_MULTIPLIER}x (position < 5% of daily volume), "
+            f"Volume Multiplier: {MM_VOLUME_MULTIPLIER}x, "
             f"Hard Floor Volume: ${MM_HARD_FLOOR_VOLUME}/day, "
-            f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}, "
-            f"Z-Score Alpha: ENABLED (±{Z_SCORE_ENTRY_THRESHOLD:.1f}σ entry, "
-            f"${MM_Z_SENSITIVITY:.4f}/σ sensitivity)"
+            f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}"
         )
         
         # Register fill handler if WebSocket manager available
