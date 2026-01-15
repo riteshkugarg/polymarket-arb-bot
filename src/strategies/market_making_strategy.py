@@ -1557,7 +1557,16 @@ class MarketMakingStrategy(BaseStrategy):
         
         # ADAPTIVE VOLUME THRESHOLD (2026 Institutional Standard)
         # Dynamic calculation based on current capital allocation
-        volume_24h = Decimal(str(market.get('volume24hr', 0)))
+        # DEBUG: Check all possible volume fields
+        volume_raw = market.get('volume24hr') or market.get('volume') or market.get('volumeNum', 0)
+        volume_24h = Decimal(str(volume_raw))
+        
+        # DEBUG FIRST MARKET: Log all fields to identify correct volume key
+        if not hasattr(self, '_debug_logged_first_market'):
+            self._debug_logged_first_market = True
+            logger.info(f"🔍 DEBUG: First market fields: {list(market.keys())}")
+            logger.info(f"🔍 DEBUG: volume24hr={market.get('volume24hr')}, volume={market.get('volume')}, volumeNum={market.get('volumeNum')}")
+        
         dynamic_min_volume = self._calculate_dynamic_min_volume()
         
         if volume_24h < dynamic_min_volume:
