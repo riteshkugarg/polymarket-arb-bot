@@ -608,23 +608,25 @@ MM_MAX_MARKETS: Final[int] = 5
 MM_VOLUME_MULTIPLIER: Final[float] = 20.0
 
 # Hard floor volume threshold (absolute minimum)
-# INSTITUTIONAL STANDARD: $50/day minimum
+# INSTITUTIONAL STANDARD: $1/day minimum (relaxed for Polymarket 2026)
 # Rationale:
-#   - Prevents quoting in "dead" markets with < $50/day volume
-#   - Even with $10 account, still require $50/day minimum
-#   - Safety guard against market microstructure breakdown
-#   - Takes precedence when Dynamic_Min_Volume < $50
-MM_HARD_FLOOR_VOLUME: Final[float] = 50.0
+#   - Polymarket has lower volume than traditional exchanges
+#   - Many quality binary markets trade $5-50/day
+#   - Still avoids completely dead markets (< $1/day)
+#   - Can be increased to $50 when trading larger size
+#   - Takes precedence when Dynamic_Min_Volume < $1
+MM_HARD_FLOOR_VOLUME: Final[float] = 1.0
 
 # Minimum liquidity depth within 2% of mid-price (USD)
-# INSTITUTIONAL HFT STANDARD: $500 minimum depth per side
+# INSTITUTIONAL HFT STANDARD: $20 minimum depth per side (relaxed for Polymarket)
 # Rationale:
-#   - Ensures sufficient depth to absorb informed order flow
-#   - Prevents quoting in markets where single trade can move price 5%+
-#   - Reduces probability of being 'picked off' by latency arbitrageurs
-#   - Aligns with institutional MM standards (Citadel, Jane Street use $1k+ thresholds)
+#   - Polymarket has different microstructure than traditional exchanges
+#   - Many binary markets have $50-200 total liquidity
+#   - $20 depth ensures we're not the ONLY liquidity provider
+#   - Prevents quoting in markets with only 1-2 other MMs
+#   - Can be increased to $500 when trading institutional size
 # Measurement: Sum of bid/ask volume within 2 ticks of best price
-MM_MIN_LIQUIDITY_DEPTH: Final[float] = 500.0
+MM_MIN_LIQUIDITY_DEPTH: Final[float] = 20.0
 
 # Minimum depth (shares) on best bid/ask
 # Per Polymarket Support: "Lower to 5 shares (or even lower) with $50 capital"
