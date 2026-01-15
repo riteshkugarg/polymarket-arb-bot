@@ -1479,8 +1479,8 @@ class MarketMakingStrategy(BaseStrategy):
             next_cursor = None
             max_pages = 10  # Fetch up to 1000 markets
             
-            # Import at runtime to avoid circular dependency
-            from src.config.constants import POLYMARKET_GAMMA_API_URL
+            # Use POLYMARKET_GAMMA_API_URL from config
+            from config.constants import POLYMARKET_GAMMA_API_URL
             
             async with aiohttp.ClientSession() as session:
                 for page in range(max_pages):
