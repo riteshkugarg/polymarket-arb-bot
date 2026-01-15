@@ -313,9 +313,16 @@ ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
 # Heartbeat interval - how often to log balance and health metrics
 HEARTBEAT_INTERVAL_SEC: Final[int] = 300  # 5 minutes
 
-# Maximum allowed drawdown before emergency kill switch
-# If balance drops by more than this amount, stop all trading
-DRAWDOWN_LIMIT_USD: Final[float] = 10.0  # $10 (10% of $100 budget)
+# Maximum allowed drawdown before emergency kill switch (USD)
+# INSTITUTIONAL HFT STANDARD: 2% of total equity
+# Current setting: $100 (adjust to 2% of your actual bankroll)
+# Rationale:
+#   - Prevents catastrophic loss from market microstructure breakdown
+#   - Triggers immediate halt of all strategies (cancel orders, close positions)
+#   - Institutional standard: 2-5% daily drawdown limit
+#   - Formula: If (peak_equity - current_equity) > DRAWDOWN_LIMIT → KILL_SWITCH
+# Note: For $5,000 bankroll, set to $100 (2%). For $100 bankroll, set to $2
+DRAWDOWN_LIMIT_USD: Final[float] = 100.0  # 2% of $5,000 institutional capital
 
 # Auto-redeem check interval - how often to check for resolved markets
 AUTO_REDEEM_INTERVAL_SEC: Final[int] = 600  # 10 minutes
@@ -446,8 +453,15 @@ BATCH_RESYNC_WAIT: Final[int] = 15
 # CAPITAL MANAGEMENT (Negative Risk & Exposure)
 # ============================================================================
 
-# Maximum total exposure in USDC (principal protection on $100 budget)
-MAX_TOTAL_EXPOSURE: Final[float] = 95.0
+# Maximum total exposure in USDC (principal protection)
+# INSTITUTIONAL HFT STANDARD: Scale to actual bankroll
+# Current setting: $5,000 (adjust to your actual capital allocation)
+# Rationale:
+#   - Prevents over-leveraging across all strategies
+#   - Maintains 10-20% cash buffer for margin calls / unexpected fills
+#   - Institutional standard: 80-90% utilization max
+# Note: Update this value to match your actual trading capital
+MAX_TOTAL_EXPOSURE: Final[float] = 5000.0
 
 # NegRisk Adapter contract address for token conversion
 NEGRISK_ADAPTER_ADDRESS: Final[str] = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
@@ -534,19 +548,24 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 # Market Selection
 # -----------------
 # Minimum 24h volume to consider for market making (USD)
-# INSTITUTIONAL UPGRADE: $10,000/day minimum for quality liquidity
-# Previous: $10 (discovery mode - too low for institutional trading)
-# Rationale: Filters for established markets with real activity
-# Targets 300+ markets with real spreads vs 1000+ dead markets
-#
-# PRODUCTION NOTE: This significantly expands market pool from $50k threshold
-# while filtering out ultra-low quality markets (<$10k/day)
-MM_MIN_MARKET_VOLUME_24H: Final[float] = 10000.0
+# INSTITUTIONAL HFT STANDARD: $25,000/day minimum (Tier-1 markets only)
+# Rationale:
+#   - Ensures sufficient noise-to-signal ratio for maker profitability
+#   - Filters out low-activity markets prone to adverse selection
+#   - Targets liquid order books where spreads are tightest (0.5-2%)
+#   - Reduces toxic flow exposure from informed traders in thin markets
+# Expected: 100-200 Tier-1 markets (vs 1000+ total Polymarket markets)
+MM_MIN_MARKET_VOLUME_24H: Final[float] = 25000.0
 
-# Minimum liquidity (orderbook depth) - MORE CRITICAL THAN VOLUME
-# DISCOVERY MODE: $5 (ultra-low to discover what's actually available)
-# Previous: $20 (too high - found 0 markets)
-MM_MIN_LIQUIDITY: Final[float] = 5.0
+# Minimum liquidity depth within 2% of mid-price (USD)
+# INSTITUTIONAL HFT STANDARD: $500 minimum depth per side
+# Rationale:
+#   - Ensures sufficient depth to absorb informed order flow
+#   - Prevents quoting in markets where single trade can move price 5%+
+#   - Reduces probability of being 'picked off' by latency arbitrageurs
+#   - Aligns with institutional MM standards (Citadel, Jane Street use $1k+ thresholds)
+# Measurement: Sum of bid/ask volume within 2 ticks of best price
+MM_MIN_LIQUIDITY_DEPTH: Final[float] = 500.0
 
 # Minimum depth (shares) on best bid/ask
 # Per Polymarket Support: "Lower to 5 shares (or even lower) with $50 capital"
@@ -562,7 +581,13 @@ MM_MAX_SPREAD_PERCENT: Final[float] = 0.07  # 7% max spread
 MM_PREFER_BINARY_MARKETS: Final[bool] = True
 
 # Maximum number of markets to make simultaneously
-MM_MAX_ACTIVE_MARKETS: Final[int] = 3
+# INSTITUTIONAL HFT STANDARD: 10 markets max
+# Rationale:
+#   - Concentrates capital in highest-conviction, highest-volume opportunities
+#   - Allows proper risk monitoring per market (diversification without dilution)
+#   - Limits operational complexity (order management, inventory tracking)
+#   - Balances portfolio correlation risk (10 markets = acceptable cross-exposure)
+MM_MAX_ACTIVE_MARKETS: Final[int] = 10
 
 
 # Position Sizing
@@ -624,18 +649,74 @@ MM_POSITION_CHECK_INTERVAL: Final[int] = 30
 # If price moves > 15% against position, exit immediately
 MM_EMERGENCY_EXIT_THRESHOLD: Final[float] = 0.15
 
+# Maximum directional exposure per market (USD)
+# INSTITUTIONAL HFT STANDARD: $200 per market
+# Rationale:
+#   - Limits single-market delta risk (correlation with other positions)
+#   - Ensures portfolio remains market-neutral (sum of deltas ≈ 0)
+#   - Prevents concentration risk in binary outcomes
+# Formula: abs(long_exposure - short_exposure) ≤ $200
+MM_MAX_DIRECTIONAL_EXPOSURE_PER_MARKET: Final[float] = 200.0
+
+# Gamma (Risk Aversion Parameter) for Avellaneda-Stoikov inventory skew
+# INSTITUTIONAL HFT STANDARD: 0.15
+# Rationale:
+#   - Balances fill rate vs risk of adverse inventory accumulation
+#   - Higher gamma = more aggressive inventory reduction (wider spreads when skewed)
+#   - Lower gamma = more fills but higher directional risk
+#   - Industry standard: 0.1 (aggressive) to 0.3 (conservative)
+# Formula: spread_skew = gamma × inventory_imbalance × volatility
+MM_GAMMA_RISK_AVERSION: Final[float] = 0.15
+
+# Boundary risk thresholds for Bernoulli variance mode
+# INSTITUTIONAL HFT STANDARD: [0.10, 0.90]
+# Rationale:
+#   - At p < 0.10 or p > 0.90, Bernoulli variance collapses: Var = p(1-p) → 0
+#   - Triggers passive-only mode (no aggressive quoting near certainty)
+#   - Prevents adverse selection when market has strong directional conviction
+#   - Used by BoundaryRiskEngine in polymarket_mm.py
+MM_BOUNDARY_THRESHOLD_LOW: Final[float] = 0.10
+MM_BOUNDARY_THRESHOLD_HIGH: Final[float] = 0.90
+
+# NegRisk market signature buffer (ticks)
+# INSTITUTIONAL STANDARD: 2 ticks
+# Rationale:
+#   - Accounts for price precision errors in NegRisk CTF signature calculation
+#   - Prevents rejection of valid orders due to floating-point rounding
+#   - Buffer: ±2 × $0.01 = ±$0.02 tolerance
+NEGRISK_BUFFER_TICKS: Final[int] = 2
+
+# Maker fee rate in basis points (bps)
+# 2026 POLYMARKET STANDARD: 0 bps (maker rebate program)
+# Rationale:
+#   - Post-only orders currently receive 0 bps rebate (may increase to 2-5 bps)
+#   - Taker fee: 100 bps (1.0%)
+#   - This constant updated when Polymarket announces rebate tier adjustments
+# Note: Set to 0 until rebate program confirmed (check /fees endpoint)
+FEE_RATE_BPS_MAKER: Final[int] = 0
+
 
 # Order Management
 # -----------------
 # Quote update frequency (seconds)
-# INSTITUTION-GRADE: 3s refresh (was 20s)
-# Per optimization: With WebSockets, can refresh faster without rate limits
-# 20s was too slow - quotes go stale in fast markets (debates, sports)
-MM_QUOTE_UPDATE_INTERVAL: Final[int] = 3
+# INSTITUTIONAL HFT STANDARD: 1-second refresh
+# Rationale:
+#   - 2026 WebSocket architecture eliminates polling overhead
+#   - Reduces 'stale quote' risk in fast-moving markets (sports, breaking news)
+#   - Competitive with institutional MM firms (sub-second is standard)
+#   - Allows rapid inventory rebalancing after fills
+# Previous: 3s (too slow for HFT), 20s (legacy polling mode)
+MM_QUOTE_UPDATE_INTERVAL: Final[int] = 1
 
 # Order time-to-live (seconds)
-# Cancel and replace orders after this duration even if not filled
-MM_ORDER_TTL: Final[int] = 120
+# INSTITUTIONAL HFT STANDARD: 60-second TTL
+# Rationale:
+#   - Prevents 'stale quote sniping' by informed traders
+#   - Forces re-evaluation of mid-price and volatility assumptions
+#   - Reduces adverse selection in fast-moving markets
+#   - Industry standard: 30-60s for crypto MM, 60-120s for equity MM
+# Note: Aggressive cancellation = higher API usage but lower risk
+MM_ORDER_TTL: Final[int] = 60
 
 # Minimum time between order placements (prevent spam)
 MM_MIN_ORDER_SPACING: Final[float] = 2.0
