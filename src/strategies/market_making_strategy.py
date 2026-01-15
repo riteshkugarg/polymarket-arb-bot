@@ -3159,8 +3159,11 @@ class MarketMakingStrategy(BaseStrategy):
                     # Synchronous cache read (O(1) lookup, no network latency)
                     snapshot = self._market_data_manager.cache.get(token_id)
                     if not snapshot:
-                        logger.debug(f"No cache data for {token_id[:8]}... - using REST fallback")
-                        # Fallback to REST
+                        logger.warning(
+                            f"⚠️ CACHE MISS: {token_id[:8]}... - Cache empty (should never happen after subscription) - "
+                            f"Using emergency REST fallback (degrades performance)"
+                        )
+                        # Fallback to REST (emergency only - cache should always be populated after subscription)
                         use_cache = False
                     else:
                         best_bid = snapshot.best_bid
@@ -3193,8 +3196,14 @@ class MarketMakingStrategy(BaseStrategy):
                         prices[token_id] = micro_price
                         continue  # Successfully got price from cache
                 
-                # REST Fallback (only if cache unavailable)
+                # EMERGENCY REST Fallback (only if cache unavailable - should never happen)
+                # After institutional-grade upgrade: Cache is populated on subscription
+                # If this code path executes, it indicates a critical issue
                 if not use_cache:
+                    logger.critical(
+                        f"🚨 PERFORMANCE DEGRADATION: Using REST polling for {token_id[:8]}... "
+                        f"(cache should be populated - investigate subscription issue)"
+                    )
                     order_book = await self.client.get_order_book(token_id)
                     bids = getattr(order_book, 'bids', [])
                     asks = getattr(order_book, 'asks', [])
