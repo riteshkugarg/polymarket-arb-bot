@@ -62,9 +62,11 @@ PROXY_WALLET_ADDRESS: Final[str] = os.getenv(
 ARBITRAGE_STRATEGY_CAPITAL: Final[float] = 20.0
 
 # Market making strategy allocation  
-# Majority of capital for active deployment
-# Supports 4-5 simultaneous market making positions at $10-12 each
-MARKET_MAKING_STRATEGY_CAPITAL: Final[float] = 50.0
+# CALIBRATED FOR $100 PRINCIPAL: 80% utilization
+# Previous: $50 (50% - too conservative for proactive MM)
+# Supports 8-10 simultaneous positions at $8-10 each
+# Rationale: Higher turnover = more rebate accumulation
+MARKET_MAKING_STRATEGY_CAPITAL: Final[float] = 80.0
 
 # Reserve buffer (emergency fund, gas, unexpected fees)
 STRATEGY_RESERVE_BUFFER: Final[float] = 2.92
@@ -609,20 +611,27 @@ MM_BASE_POSITION_SIZE: Final[float] = 5.0  # HFT institutional: $5 per quote ($1
 MM_MAX_POSITION_SIZE: Final[float] = 10.0
 
 # Maximum inventory (shares) per outcome per market
-# Prevents accumulating too much directional risk
-MM_MAX_INVENTORY_PER_OUTCOME: Final[int] = 30
+# CALIBRATED FOR $100 PRINCIPAL: 20 shares max
+# Previous: 30 shares (allows ~$15 exposure at $0.50, too high for $100)
+# Rationale: Caps single-market exposure to ~$10 (20 × $0.50)
+#   - Prevents one market from locking up entire budget
+#   - Forces diversification across multiple markets
+MM_MAX_INVENTORY_PER_OUTCOME: Final[int] = 20
 
 
 # Spread Management
 # ------------------
 # Target spread (profit per round trip before fees)
-# INSTITUTIONAL UPGRADE: 0.8% target (reduced from 3%)
-# Previous: 3% (too wide - quotes not competitive)
-# Rationale: Tighter spreads = higher fill probability in 2026 HFT environment
-MM_TARGET_SPREAD: Final[float] = 0.008  # 0.8 cents = 0.8%
+# CALIBRATED FOR $100 PRINCIPAL: 1.5 cents (0.015)
+# Previous: 0.8 cents (below 1-tick minimum, unrealistic)
+# Rationale: Must be >= 1 tick ($0.01) on Polymarket grid
+#   - 1.5 cents = competitive while ensuring spread profit
+#   - Each round trip captures 1.5 ticks after accounting for fees
+MM_TARGET_SPREAD: Final[float] = 0.015  # 1.5 cents = 1.5%
 
 # Minimum spread (don't go tighter than this)
-MM_MIN_SPREAD: Final[float] = 0.02  # 2 cents = 2%
+# CALIBRATED FOR $100 PRINCIPAL: 1 cent (0.010) - matches Polymarket tick size
+MM_MIN_SPREAD: Final[float] = 0.010  # 1 cent = 1% (1 tick minimum)
 
 # Maximum spread (if wider, market too illiquid)
 MM_MAX_SPREAD: Final[float] = 0.08  # 8 cents = 8%
@@ -680,14 +689,15 @@ MM_EMERGENCY_EXIT_THRESHOLD: Final[float] = 0.15
 MM_MAX_DIRECTIONAL_EXPOSURE_PER_MARKET: Final[float] = 15.0
 
 # Gamma (Risk Aversion Parameter) for Avellaneda-Stoikov inventory skew
-# INSTITUTIONAL HFT STANDARD: 0.15
+# INSTITUTIONAL HFT STANDARD: 0.50 (calibrated for $100 principal)
 # Rationale:
 #   - Balances fill rate vs risk of adverse inventory accumulation
 #   - Higher gamma = more aggressive inventory reduction (wider spreads when skewed)
 #   - Lower gamma = more fills but higher directional risk
-#   - Industry standard: 0.1 (aggressive) to 0.3 (conservative)
+#   - For $100 accounts: 0.50 ensures inventory skew exceeds 1-cent tick minimum
+#   - Forces offload after 2-3 fills, preventing capital lock-up
 # Formula: spread_skew = gamma × inventory_imbalance × volatility
-MM_GAMMA_RISK_AVERSION: Final[float] = 0.15
+MM_GAMMA_RISK_AVERSION: Final[float] = 0.50
 
 # Boundary risk thresholds for Bernoulli variance mode
 # INSTITUTIONAL HFT STANDARD: [0.10, 0.90]
