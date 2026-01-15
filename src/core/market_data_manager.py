@@ -1012,6 +1012,18 @@ class MarketDataManager:
         if asset_ids:
             await self.ws_manager.subscribe_assets(asset_ids)
     
+    async def subscribe_assets(self, asset_ids: List[str]) -> None:
+        """Subscribe to specific asset IDs"""
+        await self.ws_manager.subscribe_assets(asset_ids)
+    
+    def register_market_update_handler(self, handler_name: str, handler: Callable, filter_assets: Optional[Set[str]] = None) -> None:
+        """Register handler for market update events"""
+        self.ws_manager.register_market_update_handler(handler_name, handler, filter_assets)
+    
+    def register_disconnection_handler(self, handler_name: str, handler: Callable) -> None:
+        """Register handler for WebSocket disconnection events"""
+        self.ws_manager.register_disconnection_handler(handler_name, handler)
+    
     def get_latest_price(self, asset_id: str) -> Optional[float]:
         """Get latest micro-price (synchronous)"""
         return self.cache.get_latest_price(asset_id)
@@ -1027,6 +1039,10 @@ class MarketDataManager:
     def register_fill_handler(self, strategy_name: str, handler: Callable) -> None:
         """Register strategy to receive fill events"""
         self.ws_manager.register_fill_handler(strategy_name, handler)
+    
+    def get_latency_ms(self) -> Optional[float]:
+        """Get current WebSocket latency in milliseconds"""
+        return self.ws_manager.get_latency_ms()
     
     def get_market_info(self, market_id: str) -> Optional[Dict[str, Any]]:
         """Get cached market metadata"""
