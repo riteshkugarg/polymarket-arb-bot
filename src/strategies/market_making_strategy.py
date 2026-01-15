@@ -1523,34 +1523,37 @@ class MarketMakingStrategy(BaseStrategy):
                     rejection_stats[reason] = rejection_stats.get(reason, 0) + 1
             
             # Sort by volume and take top candidates (3x capacity for rotation)
+            # Use volumeNum (more specific) with volume24hr fallback
             self._eligible_markets = sorted(
                 eligible,
-                key=lambda m: m.get('volume24hr', 0),
+                key=lambda m: m.get('volumeNum') or m.get('volume24hr') or 0,
                 reverse=True
             )[:MM_MAX_MARKETS * 3]
             
             # Calculate current dynamic threshold for logging transparency
             dynamic_threshold = self._calculate_dynamic_min_volume()
+            null_vol_high_liq = getattr(self, '_null_vol_high_liq_count', 0)
             
             logger.info(
                 f"📊 INSTITUTIONAL MARKET MAKING ELIGIBILITY (scanned {len(all_markets)} markets):\n"
                 f"   ADAPTIVE FILTER: Dynamic Min Volume = ${dynamic_threshold:.2f}/day\n"
                 f"   (Balance: ${self._allocated_capital:.2f} / {MM_MAX_MARKETS} markets × {MM_VOLUME_MULTIPLIER}x, floor: ${MM_HARD_FLOOR_VOLUME})\n"
                 f"   \n"
-                f"   MICROSTRUCTURE REJECTIONS (Gamma API - Official Field Names):\n"
+                f"   MICROSTRUCTURE REJECTIONS (Official Gamma API Fields):\n"
                 f"   ❌ Not binary: {rejection_stats['not_binary']}\n"
                 f"   ❌ CLOB disabled (enableOrderBook=false): {rejection_stats.get('clob_disabled', 0)}\n"
                 f"   ❌ Tick size too wide (orderPriceMinTickSize >10¢): {rejection_stats.get('tick_size_too_wide', 0)}\n"
                 f"   ❌ Min order too large (orderMinSize >$10): {rejection_stats.get('min_order_too_large', 0)}\n"
                 f"   \n"
                 f"   DATA QUALITY REJECTIONS:\n"
-                f"   ❌ Null volume (volumeNum/volume24hr=null): {rejection_stats.get('null_volume', 0)}\n"
+                f"   ❌ Null volume + low liquidity: {rejection_stats.get('null_volume', 0)}\n"
+                f"   ✅ Null volume + high liquidity (>$200): {null_vol_high_liq}\n"
                 f"   ❌ Low volume (<${dynamic_threshold:.2f}): {rejection_stats['low_volume']}\n"
                 f"   ❌ Low liquidity (<${MM_MIN_LIQUIDITY_DEPTH}): {rejection_stats['low_liquidity']}\n"
                 f"   ❌ Inactive/closed: {rejection_stats['inactive']}\n"
                 f"   \n"
                 f"   ✅ PASSED ALL CHECKS: {rejection_stats['passed']}\n"
-                f"   📊 Using Polymarket Gamma API (camelCase): enableOrderBook, orderPriceMinTickSize, orderMinSize"
+                f"   📊 API: Gamma /markets | Fields: volumeNum, volume24hr, liquidityNum, active, closed"
             )
             
             self._last_market_scan = current_time
@@ -1582,33 +1585,33 @@ class MarketMakingStrategy(BaseStrategy):
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return (False, 'not_binary')
         
-        # MICROSTRUCTURE: CLOB status (Gamma /markets API - camelCase per Polymarket Support)
-        # enableOrderBook (boolean | null) - Default True if null/missing
+        # MICROSTRUCTURE: CLOB status (Gamma API - Official per Polymarket Support)
+        # enableOrderBook (boolean | null) - Only reject if explicitly False
         enable_order_book = market.get('enableOrderBook')
-        if enable_order_book is False:  # Explicitly False, not None
+        if enable_order_book is False:  # Explicitly disabled
             return (False, 'clob_disabled')
         
-        # MICROSTRUCTURE: Tick size and order size (Gamma API field names)
-        # orderPriceMinTickSize (number | null)
+        # MICROSTRUCTURE: Tick size and order size (Gamma API)
+        # orderPriceMinTickSize (number | null) - units unconfirmed by docs
         # orderMinSize (number | null)
         order_price_min_tick = market.get('orderPriceMinTickSize')
         order_min_size = market.get('orderMinSize')
         
-        # Validate constraints (only if data available - null means unknown)
+        # Validate constraints (only if data available)
         if order_price_min_tick is not None and order_price_min_tick > 0.1:
-            # Tick size > 10 cents (too wide for small accounts)
+            # Assuming dollars (unconfirmed): >10¢ tick too wide
             return (False, 'tick_size_too_wide')
         
         if order_min_size is not None and order_min_size > 10.0:
-            # Min order > $10 (capital inefficient for $80 account)
+            # Min order >$10 capital inefficient
             return (False, 'min_order_too_large')
         
-        # VOLUME EXTRACTION: Use actual volume data (do NOT infer from liquidity)
-        # Per Polymarket Support: volumeNum and volume24hr are authoritative
-        volume_num = market.get('volumeNum')  # Preferred field
+        # VOLUME EXTRACTION (Official Gamma fields per Polymarket Support)
+        volume_num = market.get('volumeNum')  # Preferred
         volume_24h_raw = market.get('volume24hr')  # Fallback
         
-        # Select best available volume (prefer volumeNum)
+        # CRITICAL: Handle null volume data (Polymarket issue - Jan 2026)
+        # If both volume fields are null, use liquidity-only filtering
         if volume_num is not None:
             volume_24h = Decimal(str(volume_num))
             volume_source = "volumeNum"
@@ -1616,8 +1619,23 @@ class MarketMakingStrategy(BaseStrategy):
             volume_24h = Decimal(str(volume_24h_raw))
             volume_source = "volume24hr"
         else:
-            # INSTITUTIONAL SAFETY: Skip markets with null volume (no data inference)
-            return (False, 'null_volume')
+            # NULL VOLUME: Fall back to liquidity-only filtering
+            liquidity_num = Decimal(str(market.get('liquidityNum', 0)))
+            
+            # Accept markets with strong liquidity despite null volume
+            if liquidity_num >= Decimal(str(MM_MIN_LIQUIDITY_DEPTH * 10)):
+                # High liquidity threshold: 10x minimum (e.g., $200 for $20 min)
+                if not hasattr(self, '_null_vol_high_liq_count'):
+                    self._null_vol_high_liq_count = 0
+                self._null_vol_high_liq_count += 1
+                
+                # Skip to final checks (active/closed)
+                if market.get('closed', False) or not market.get('active', True):
+                    return (False, 'inactive')
+                
+                return (True, 'passed')  # Accept despite null volume
+            else:
+                return (False, 'null_volume')
         
         dynamic_min_volume = self._calculate_dynamic_min_volume()
         
@@ -1632,12 +1650,12 @@ class MarketMakingStrategy(BaseStrategy):
             )
             return (False, 'low_volume')
         
-        # Active market check
+        # Active market check (official Gamma fields: active, closed)
         if market.get('closed', False) or not market.get('active', True):
             return (False, 'inactive')
         
-        # Liquidity check (keep for basic safety)
-        liquidity_num = market.get('liquidityNum', market.get('liquidity', 0))
+        # Liquidity check (official field: liquidityNum per Polymarket Support)
+        liquidity_num = market.get('liquidityNum', 0)
         if liquidity_num < MM_MIN_LIQUIDITY_DEPTH:
             return (False, 'low_liquidity')
         
@@ -1646,23 +1664,22 @@ class MarketMakingStrategy(BaseStrategy):
     def _is_market_eligible(self, market: Dict[str, Any]) -> bool:
         """Check if market meets criteria for market making
         
-        INSTITUTIONAL FILTERING (Jan 2026 - Polymarket Support Guidance):
-        - Focus on market microstructure and execution safety
-        - Require actual volume data (no liquidity inference)
-        - Check CLOB active (enable_order_book + accepting_orders)
-        - Validate tick size and minimum order constraints
+        INSTITUTIONAL FILTERING (Jan 2026 - Polymarket Support Validated):
+        - Official Gamma API fields: volumeNum, volume24hr, liquidityNum, active, closed
+        - Fallback to liquidity-only if volume=null (Polymarket data issue)
+        - Check CLOB active (enableOrderBook not false)
+        - Validate tick size and order constraints if available
         """
         # Binary market check
         tokens = market.get('tokens', [])
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return False
         
-        # MICROSTRUCTURE: CLOB status (Gamma API - camelCase)
-        enable_order_book = market.get('enableOrderBook')
-        if enable_order_book is False:  # Explicitly disabled
+        # MICROSTRUCTURE: CLOB status
+        if market.get('enableOrderBook') is False:
             return False
         
-        # MICROSTRUCTURE: Constraints (Gamma API field names)
+        # MICROSTRUCTURE: Constraints
         order_price_min_tick = market.get('orderPriceMinTickSize')
         order_min_size = market.get('orderMinSize')
         
@@ -1671,28 +1688,31 @@ class MarketMakingStrategy(BaseStrategy):
         if order_min_size is not None and order_min_size > 10.0:
             return False
         
-        # Active market check
+        # Active check
         if market.get('closed', False) or not market.get('active', True):
             return False
         
-        # VOLUME: Require actual data (no inference)
+        # VOLUME: Official Gamma fields (volumeNum preferred)
         volume_num = market.get('volumeNum')
         volume_24h_raw = market.get('volume24hr')
         
+        # Handle null volume: Use liquidity-only filtering
         if volume_num is not None:
             volume_24h = Decimal(str(volume_num))
         elif volume_24h_raw is not None:
             volume_24h = Decimal(str(volume_24h_raw))
         else:
-            return False  # Skip markets with null volume
+            # Null volume: Accept if high liquidity (10x minimum)
+            liquidity_num = market.get('liquidityNum', 0)
+            return liquidity_num >= (MM_MIN_LIQUIDITY_DEPTH * 10)
         
-        # ADAPTIVE FILTERING: Dynamic threshold
+        # Check volume threshold
         dynamic_min_volume = self._calculate_dynamic_min_volume()
         if volume_24h < dynamic_min_volume:
             return False
         
-        # Liquidity check (basic safety)
-        liquidity_num = market.get('liquidityNum', market.get('liquidity', 0))
+        # Liquidity check
+        liquidity_num = market.get('liquidityNum', 0)
         if liquidity_num < MM_MIN_LIQUIDITY_DEPTH:
             return False
         
