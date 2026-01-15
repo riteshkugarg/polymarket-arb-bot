@@ -1574,9 +1574,18 @@ class MarketMakingStrategy(BaseStrategy):
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return (False, 'not_binary')
         
-        # MICROSTRUCTURE: CLOB must be active (Polymarket Support - Jan 2026)
-        accepting_orders = market.get('acceptingOrders', False)
-        enable_order_book = market.get('enable_order_book', False)
+        # DEBUG: Log first market to identify actual field names
+        if not hasattr(self, '_debug_logged_market_fields'):
+            self._debug_logged_market_fields = True
+            logger.info(f"🔍 DEBUG: Market fields available: {list(market.keys())[:30]}")
+            logger.info(f"🔍 DEBUG: acceptingOrders={market.get('acceptingOrders')}, accepting_orders={market.get('accepting_orders')}")
+            logger.info(f"🔍 DEBUG: enable_order_book={market.get('enable_order_book')}, enableOrderBook={market.get('enableOrderBook')}")
+            logger.info(f"🔍 DEBUG: active={market.get('active')}, closed={market.get('closed')}")
+        
+        # MICROSTRUCTURE: CLOB status (try both snake_case and camelCase)
+        # DEFAULT TO TRUE: If field missing, assume market is available (conservative but practical)
+        accepting_orders = market.get('acceptingOrders', market.get('accepting_orders', True))
+        enable_order_book = market.get('enableOrderBook', market.get('enable_order_book', True))
         
         if not accepting_orders:
             return (False, 'not_accepting_orders')
@@ -1584,11 +1593,11 @@ class MarketMakingStrategy(BaseStrategy):
         if not enable_order_book:
             return (False, 'clob_disabled')
         
-        # MICROSTRUCTURE: Validate tick size and minimum order size
-        minimum_tick_size = market.get('minimum_tick_size', 0.01)
-        minimum_order_size = market.get('minimum_order_size', 1.0)
+        # MICROSTRUCTURE: Validate tick size and minimum order size (try both naming conventions)
+        minimum_tick_size = market.get('minimumTickSize', market.get('minimum_tick_size', 0.01))
+        minimum_order_size = market.get('minimumOrderSize', market.get('minimum_order_size', 1.0))
         
-        # Reject markets with unreasonable constraints
+        # Reject markets with unreasonable constraints (if data available)
         if minimum_tick_size > 0.1:  # Tick size > 10 cents (too wide)
             return (False, 'tick_size_too_wide')
         
@@ -1649,16 +1658,22 @@ class MarketMakingStrategy(BaseStrategy):
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return False
         
-        # MICROSTRUCTURE: CLOB must be active
-        if not market.get('acceptingOrders', False):
+        # MICROSTRUCTURE: CLOB status (try both naming conventions, default to True if missing)
+        accepting_orders = market.get('acceptingOrders', market.get('accepting_orders', True))
+        enable_order_book = market.get('enableOrderBook', market.get('enable_order_book', True))
+        
+        if not accepting_orders:
             return False
-        if not market.get('enable_order_book', False):
+        if not enable_order_book:
             return False
         
-        # MICROSTRUCTURE: Validate constraints
-        if market.get('minimum_tick_size', 0.01) > 0.1:  # >10¢ tick
+        # MICROSTRUCTURE: Validate constraints (try both naming conventions)
+        minimum_tick_size = market.get('minimumTickSize', market.get('minimum_tick_size', 0.01))
+        minimum_order_size = market.get('minimumOrderSize', market.get('minimum_order_size', 1.0))
+        
+        if minimum_tick_size > 0.1:  # >10¢ tick
             return False
-        if market.get('minimum_order_size', 1.0) > 10.0:  # >$10 min
+        if minimum_order_size > 10.0:  # >$10 min
             return False
         
         # Active market check
