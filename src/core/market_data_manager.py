@@ -930,15 +930,24 @@ class PolymarketWSManager:
                         asks = book_data.asks if hasattr(book_data, 'asks') else []
                         
                         if bids and asks:
-                            best_bid = float(bids[0]['price'])
-                            best_ask = float(asks[0]['price'])
-                            bid_size = float(bids[0].get('size', 0))
-                            ask_size = float(asks[0].get('size', 0))
+                            # Handle both dict and object formats
+                            def get_price_size(item):
+                                if isinstance(item, dict):
+                                    return float(item['price']), float(item.get('size', 0))
+                                else:
+                                    return float(item.price), float(getattr(item, 'size', 0))
+                            
+                            best_bid, bid_size = get_price_size(bids[0])
+                            best_ask, ask_size = get_price_size(asks[0])
                             
                             mid_price = (best_bid + best_ask) / 2.0
                             total_vol = bid_size + ask_size
                             micro_price = ((bid_size * best_ask) + (ask_size * best_bid)) / total_vol if total_vol > 0 else mid_price
                             obi = (bid_size - ask_size) / total_vol if total_vol > 0 else 0.0
+                            
+                            # Convert to dict format for cache
+                            bids_list = [{'price': get_price_size(b)[0], 'size': get_price_size(b)[1]} for b in bids]
+                            asks_list = [{'price': get_price_size(a)[0], 'size': get_price_size(a)[1]} for a in asks]
                             
                             # Create snapshot and cache
                             snapshot = MarketSnapshot(
@@ -951,11 +960,11 @@ class PolymarketWSManager:
                                 micro_price=micro_price,
                                 obi=obi,
                                 last_update=time.time(),
-                                bids=bids,
-                                asks=asks
+                                bids=bids_list,
+                                asks=asks_list
                             )
                             self.cache.update(asset_id, snapshot, force=True)
-                            logger.info(f"[REST] Cached initial order book for {asset_id[:8]}... (bid: {best_bid}, ask: {best_ask}, depth: {len(bids)}x{len(asks)})")
+                            logger.info(f"[REST] Cached initial order book for {asset_id[:8]}... (bid: {best_bid}, ask: {best_ask}, depth: {len(bids_list)}x{len(asks_list)})")
                         else:
                             logger.warning(f"[REST] Empty order book for {asset_id[:8]}... (may be inactive)")
                 except Exception as e:
