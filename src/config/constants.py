@@ -557,7 +557,7 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 #   - Targets liquid order books where spreads are tightest (0.5-2%)
 #   - Reduces toxic flow exposure from informed traders in thin markets
 # Expected: 100-200 Tier-1 markets (vs 1000+ total Polymarket markets)
-MM_MIN_MARKET_VOLUME_24H: Final[float] = 25000.0
+MM_MIN_MARKET_VOLUME_24H: Final[float] = 15000.0  # HFT institutional: Lower threshold for $100 principal
 
 # Minimum liquidity depth within 2% of mid-price (USD)
 # INSTITUTIONAL HFT STANDARD: $500 minimum depth per side
@@ -601,7 +601,7 @@ MM_MAX_ACTIVE_MARKETS: Final[int] = 10
 #   - Allows 10-20 simultaneous positions for diversification
 #   - Higher turnover potential = more rebate accumulation
 #   - Reduces single-position concentration risk
-MM_BASE_POSITION_SIZE: Final[float] = 5.0
+MM_BASE_POSITION_SIZE: Final[float] = 5.0  # HFT institutional: $5 per quote ($100 principal / 20 positions)
 
 # Maximum position size per market (USD)
 # Institutional standard: 1.5-2x base position size
@@ -717,6 +717,65 @@ NEGRISK_BUFFER_TICKS: Final[int] = 2
 FEE_RATE_BPS_MAKER: Final[int] = 0
 
 
+# ============================================================================
+# Z-SCORE MEAN REVERSION ALPHA OVERLAY (2026 HFT Upgrade)
+# ============================================================================
+# Statistical arbitrage overlay for asymmetric quoting based on price deviations
+
+# Rolling window size for Z-Score calculation (in ticks/samples)
+# INSTITUTIONAL HFT STANDARD: 20 periods (1-minute ticks = 20-minute lookback)
+# Rationale:
+#   - Captures short-term mean-reverting inefficiencies
+#   - Longer windows (60+) = slow to adapt to regime changes
+#   - Shorter windows (10-) = too noisy, false signals
+Z_SCORE_LOOKBACK_PERIODS: Final[int] = 20
+
+# Z-Score entry threshold - trigger asymmetric quoting
+# INSTITUTIONAL STANDARD: 2.0 sigma (97.7% confidence in mean reversion)
+# Rationale:
+#   - Z > 2.0 = Overbought (price 2 std devs above mean)
+#   - Z < -2.0 = Oversold (price 2 std devs below mean)
+#   - Lower threshold (1.5) = more trades but higher noise
+#   - Higher threshold (2.5) = fewer trades but higher conviction
+Z_SCORE_ENTRY_THRESHOLD: Final[float] = 2.0
+
+# Z-Score exit target - when to stop skewing quotes
+# INSTITUTIONAL STANDARD: 0.5 sigma (mean reversion near completion)
+# Rationale:
+#   - Exit at Z=0.5 captures majority of mean-reversion move
+#   - Prevents over-holding as price normalizes
+#   - Allows exit before next oscillation begins
+Z_SCORE_EXIT_TARGET: Final[float] = 0.5
+
+# Z-Score halt threshold - extreme outlier protection
+# INSTITUTIONAL STANDARD: 3.5 sigma (99.95% confidence in regime change)
+# Rationale:
+#   - Z > 3.5 = Potential news event, earnings surprise, or toxic flow
+#   - Prevents quoting into "runaway" markets where mean may have shifted
+#   - Protects against adverse selection during fundamental price discovery
+#   - Resume quoting once Z returns below entry threshold
+Z_SCORE_HALT_THRESHOLD: Final[float] = 3.5
+
+# Z-Score sensitivity - reservation price adjustment factor (dollars per sigma)
+# INSTITUTIONAL STANDARD: 0.005 (0.5 cents per sigma)
+# Rationale:
+#   - Controls magnitude of asymmetric skew applied to reservation price
+#   - Higher sensitivity = more aggressive mean reversion bets
+#   - Formula: Reservation_Shift = Z_Score * MM_Z_SENSITIVITY
+#   - Example: Z=2.5, sensitivity=0.005 → shift $0.0125 (1.25 cents)
+#   - This shift is ADDITIVE to Avellaneda-Stoikov inventory skew
+MM_Z_SENSITIVITY: Final[float] = 0.005
+
+# Z-Score update interval (seconds)
+# How frequently to recalculate Z-Score from rolling window
+# INSTITUTIONAL HFT STANDARD: 60 seconds (1-minute OHLCV ticks)
+# Rationale:
+#   - Matches typical institutional alpha refresh rate
+#   - More frequent updates (10s) = unstable Z-Score (not enough price discovery)
+#   - Less frequent updates (300s) = stale signal, missed opportunities
+Z_SCORE_UPDATE_INTERVAL: Final[int] = 60
+
+
 # Order Management
 # -----------------
 # Quote update frequency (seconds)
@@ -727,7 +786,7 @@ FEE_RATE_BPS_MAKER: Final[int] = 0
 #   - Competitive with institutional MM firms (sub-second is standard)
 #   - Allows rapid inventory rebalancing after fills
 # Previous: 3s (too slow for HFT), 20s (legacy polling mode)
-MM_QUOTE_UPDATE_INTERVAL: Final[int] = 1
+MM_QUOTE_UPDATE_INTERVAL: Final[int] = 1  # HFT institutional: 1 second quote refresh
 
 # Order time-to-live (seconds)
 # INSTITUTIONAL HFT STANDARD: 60-second TTL
@@ -737,7 +796,7 @@ MM_QUOTE_UPDATE_INTERVAL: Final[int] = 1
 #   - Reduces adverse selection in fast-moving markets
 #   - Industry standard: 30-60s for crypto MM, 60-120s for equity MM
 # Note: Aggressive cancellation = higher API usage but lower risk
-MM_ORDER_TTL: Final[int] = 60
+MM_ORDER_TTL: Final[int] = 45  # HFT institutional: 45 second order time-to-live
 
 # Minimum time between order placements (prevent spam)
 MM_MIN_ORDER_SPACING: Final[float] = 2.0
