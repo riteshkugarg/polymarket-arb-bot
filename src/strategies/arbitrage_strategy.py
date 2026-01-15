@@ -383,7 +383,7 @@ class ArbitrageStrategy(BaseStrategy):
             Arbitrage profit: $1.00 - $0.95 = $0.05 per share
         """
         try:
-            logger.info("Discovering multi-outcome arbitrage events...")
+            logger.info("🔎 Discovering MULTI-OUTCOME (3+) arbitrage events (binary markets cannot be arbitraged)...")
             
             # Fetch events with pagination (per Polymarket support, must specify limit)
             all_events = []
@@ -414,10 +414,17 @@ class ArbitrageStrategy(BaseStrategy):
             logger.debug(f"Fetched {len(all_events)} total events from Gamma API")
             
             # DEBUG: Analyze outcome count distribution
+            # Note: Events may have 'markets' array, or 'outcomes' in different location
             outcome_distribution = {}
             for event in all_events:
+                # Try multiple fields: outcomes, markets, or count clobTokenIds
                 outcomes = event.get('outcomes', [])
-                count = len(outcomes)
+                if not outcomes:
+                    markets = event.get('markets', [])
+                    # Each market represents an outcome
+                    count = len(markets)
+                else:
+                    count = len(outcomes)
                 outcome_distribution[count] = outcome_distribution.get(count, 0) + 1
             
             logger.info(
@@ -445,7 +452,12 @@ class ArbitrageStrategy(BaseStrategy):
             rejection_stats = {'binary': 0, 'negrisk_placeholders': 0}
             
             for event in all_events:
+                # Try to get outcomes, fallback to markets array
                 outcomes = event.get('outcomes', [])
+                if not outcomes:
+                    # Use markets array - each market is an outcome
+                    markets = event.get('markets', [])
+                    outcomes = markets
                 
                 # Skip binary events (only 2 outcomes)
                 if len(outcomes) < 3:
@@ -472,11 +484,12 @@ class ArbitrageStrategy(BaseStrategy):
                     self._arb_eligible_markets.add(token_id)
             
             logger.info(
-                f"🔍 FILTERING ANALYSIS:\n"
-                f"   ❌ Rejected (binary <3 outcomes): {rejection_stats['binary']}\n"
+                f"🔍 ARBITRAGE FILTERING - MULTI-OUTCOME EVENTS ONLY:\n"
+                f"   Strategy: Looking for events with 3+ outcomes (binary arbitrage impossible)\n"
+                f"   ❌ Rejected (binary - only 2 outcomes): {rejection_stats['binary']}\n"
                 f"   ❌ Rejected (NegRisk placeholders): {rejection_stats['negrisk_placeholders']}\n"
-                f"   ✅ PASSED FILTER: {len(multi_outcome_events)} events\n"
-                f"   ✅ Total assets: {len(self._arb_eligible_markets)}"
+                f"   ✅ PASSED FILTER (3+ outcomes): {len(multi_outcome_events)} events\n"
+                f"   ✅ Total tradeable assets: {len(self._arb_eligible_markets)}"
             )
             
             # FALLBACK: If no multi-outcome events found, log guidance

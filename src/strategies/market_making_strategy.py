@@ -1558,12 +1558,13 @@ class MarketMakingStrategy(BaseStrategy):
             null_vol_high_liq = getattr(self, '_null_vol_high_liq_count', 0)
             
             logger.info(
-                f"📊 INSTITUTIONAL MARKET MAKING ELIGIBILITY (scanned {len(all_markets)} markets):\n"
+                f"📊 MARKET MAKING ELIGIBILITY - BINARY MARKETS ONLY (scanned {len(all_markets)} markets):\n"
+                f"   Strategy: Looking for BINARY (2-outcome) markets for liquidity provision\n"
                 f"   ADAPTIVE FILTER: Dynamic Min Volume = ${dynamic_threshold:.2f}/day\n"
                 f"   (Balance: ${self._allocated_capital:.2f} / {MM_MAX_MARKETS} markets × {MM_VOLUME_MULTIPLIER}x, floor: ${MM_HARD_FLOOR_VOLUME})\n"
                 f"   \n"
                 f"   MICROSTRUCTURE REJECTIONS (Official Gamma API Fields):\n"
-                f"   ❌ Not binary: {rejection_stats['not_binary']}\n"
+                f"   ❌ Not binary (requires exactly 2 outcomes): {rejection_stats['not_binary']}\n"
                 f"   ❌ CLOB disabled (enableOrderBook=false): {rejection_stats.get('clob_disabled', 0)}\n"
                 f"   ❌ Tick size too wide (orderPriceMinTickSize >10¢): {rejection_stats.get('tick_size_too_wide', 0)}\n"
                 f"   ❌ Min order too large (orderMinSize >$10): {rejection_stats.get('min_order_too_large', 0)}\n"
@@ -1603,9 +1604,10 @@ class MarketMakingStrategy(BaseStrategy):
             logger.info(f"🔍 liquidityNum={market.get('liquidityNum')}, liquidity={market.get('liquidity')}")
             logger.info(f"🔍 enableOrderBook={market.get('enableOrderBook')}, active={market.get('active')}, closed={market.get('closed')}")
         
-        # Binary market check (Gamma API uses 'outcomes' not 'tokens')
-        outcomes = market.get('outcomes', [])
-        if MM_PREFER_BINARY_MARKETS and len(outcomes) != 2:
+        # Binary market check (Gamma API uses 'clobTokenIds' for markets)
+        # Note: 'outcomes' field is for EVENTS, not markets
+        clob_token_ids = market.get('clobTokenIds', [])
+        if MM_PREFER_BINARY_MARKETS and len(clob_token_ids) != 2:
             return (False, 'not_binary')
         
         # MICROSTRUCTURE: CLOB status (Gamma API - Official per Polymarket Support)
@@ -1693,9 +1695,9 @@ class MarketMakingStrategy(BaseStrategy):
         - Check CLOB active (enableOrderBook not false)
         - Validate tick size and order constraints if available
         """
-        # Binary market check
-        tokens = market.get('tokens', [])
-        if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
+        # Binary market check (Gamma API uses 'clobTokenIds')
+        clob_token_ids = market.get('clobTokenIds', [])
+        if MM_PREFER_BINARY_MARKETS and len(clob_token_ids) != 2:
             return False
         
         # MICROSTRUCTURE: CLOB status
