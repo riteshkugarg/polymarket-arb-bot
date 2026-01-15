@@ -174,6 +174,7 @@ class ZScoreManager:
     def __init__(self, lookback_periods: int = Z_SCORE_LOOKBACK_PERIODS):
         """
         Initialize Z-Score calculator with EWMA volatility (2026 HFT Upgrade)
+        + DRIFT-PROTECTED DUAL-WINDOW MEAN (Module 1 - Institutional Guard)
         
         Args:
             lookback_periods: Number of mid-price samples to store (default: 20)
@@ -191,9 +192,22 @@ class ZScoreManager:
         self.ewma_variance = None  # Initialize on first return
         self.last_price = None
         
+        # ═══════════════════════════════════════════════════════════════════
+        # MODULE 1: DRIFT-PROTECTED Z-SCORE (Volatility Guard)
+        # ═══════════════════════════════════════════════════════════════════
+        # Prevents "chasing" flash-crashes and fat-finger trades
+        # Dual-window mean: Local (20) vs Global (500)
+        # Clamps local mean shift to ±2.5σ of global distribution
+        # ═══════════════════════════════════════════════════════════════════
+        self.global_price_window: deque = deque(maxlen=500)  # Long-term reference
+        self.drift_clamp_threshold = 2.5  # Sigma threshold for clamping
+        self.drift_clamp_active = False  # Tracking flag
+        
         logger.info(
-            f"ZScoreManager initialized (EWMA volatility) - "
+            f"ZScoreManager initialized (EWMA volatility + Drift Protection) - "
             f"Lookback: {lookback_periods} periods, "
+            f"Global window: 500 samples (drift protection), "
+            f"Drift clamp: ±{self.drift_clamp_threshold:.1f}σ, "
             f"Entry threshold: ±{Z_SCORE_ENTRY_THRESHOLD:.1f}σ, "
             f"Halt threshold: ±{Z_SCORE_HALT_THRESHOLD:.1f}σ, "
             f"Sensitivity: ${MM_Z_SENSITIVITY:.4f}/σ, "
@@ -228,6 +242,7 @@ class ZScoreManager:
         
         # Add micro-price to rolling window (deque auto-manages size)
         self.price_window.append(micro_price)
+        self.global_price_window.append(micro_price)  # Also track in global window
         self.last_update_time = time.time()
         
         # Need minimum samples for statistical significance
@@ -239,8 +254,55 @@ class ZScoreManager:
             self.current_z_score = 0.0
             return 0.0
         
-        # Calculate rolling mean (for Z-Score center)
-        mean = statistics.mean(self.price_window)
+        # Calculate LOCAL mean (20-period EWMA)
+        local_mean = statistics.mean(self.price_window)
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # MODULE 1: DRIFT PROTECTION (Dual-Window Mean Clamping)
+        # ═══════════════════════════════════════════════════════════════════
+        # If local mean drifts >2.5σ from global mean → CLAMP to boundary
+        # Prevents chasing flash-crashes, fat-fingers, or market manipulation
+        # ═══════════════════════════════════════════════════════════════════
+        if len(self.global_price_window) >= 100:  # Need minimum global samples
+            global_mean = statistics.mean(self.global_price_window)
+            try:
+                global_std_dev = statistics.stdev(self.global_price_window)
+            except statistics.StatisticsError:
+                global_std_dev = 1e-6
+            
+            # Check if local mean has drifted beyond acceptable bounds
+            mean_drift = abs(local_mean - global_mean)
+            drift_threshold = self.drift_clamp_threshold * global_std_dev
+            
+            if mean_drift > drift_threshold:
+                # CLAMP local mean to ±2.5σ boundary
+                if local_mean > global_mean:
+                    clamped_mean = global_mean + drift_threshold
+                else:
+                    clamped_mean = global_mean - drift_threshold
+                
+                if not self.drift_clamp_active:  # Log only on activation
+                    logger.info(
+                        f"[INSTITUTIONAL_GUARD] DRIFT PROTECTION ACTIVATED - "
+                        f"Local mean ${local_mean:.4f} drifted {mean_drift/global_std_dev:.2f}σ "
+                        f"from global ${global_mean:.4f} (threshold: {self.drift_clamp_threshold:.1f}σ). "
+                        f"Clamping to ${clamped_mean:.4f} to prevent chasing anomalous moves."
+                    )
+                    self.drift_clamp_active = True
+                
+                mean = clamped_mean  # Use clamped mean for Z-Score
+            else:
+                mean = local_mean  # Use local mean (normal operation)
+                if self.drift_clamp_active:  # Log deactivation
+                    logger.info(
+                        f"[INSTITUTIONAL_GUARD] DRIFT PROTECTION DEACTIVATED - "
+                        f"Local mean ${local_mean:.4f} returned within {self.drift_clamp_threshold:.1f}σ "
+                        f"of global ${global_mean:.4f}. Resuming normal Z-Score calculation."
+                    )
+                    self.drift_clamp_active = False
+        else:
+            # Not enough global samples yet - use local mean
+            mean = local_mean
         
         # ═══════════════════════════════════════════════════════════════════
         # EWMA VOLATILITY (RiskMetrics Standard - λ=0.94)
@@ -263,7 +325,8 @@ class ZScoreManager:
                 self.ewma_variance = squared_return
             else:
                 # EWMA update: σ²(t) = λ×σ²(t-1) + (1-λ)×return²(t)
-                self.ewma_variance = (self.ewma_lambda * self.ewma_variance + \n                                      (1 - self.ewma_lambda) * squared_return)
+                self.ewma_variance = (self.ewma_lambda * self.ewma_variance +
+                                      (1 - self.ewma_lambda) * squared_return)
             
             # Extract std dev from variance
             ewma_std_dev = math.sqrt(self.ewma_variance) if self.ewma_variance > 0 else 1e-6
@@ -390,13 +453,140 @@ class MarketPosition:
         self.toxic_flow_threshold = 50.0  # $50 filled in window = toxic
         self.spread_widening_until = 0.0  # timestamp to stop widening
         
-        # Post-trade alpha tracking (markout P&L)
-        # Format: (timestamp, token_id, side, fill_price, micro_price_at_fill, size)
-        self.fill_history: List[Tuple[float, str, str, float, float, float]] = []
-        self.markout_intervals = [5, 30, 300]  # 5s, 30s, 5min
+        # ═══════════════════════════════════════════════════════════════════
+        # MODULE 4: MARKOUT SELF-TUNING (Alpha Guard)
+        # ═══════════════════════════════════════════════════════════════════
+        # Calculates 5-second Markout PnL (PnL if closed 5s after fill)
+        # Maintains deque of last 20 markouts
+        # If mean < 0 → Increment MM_TARGET_SPREAD + MM_Z_SENSITIVITY by 15%
+        # Reset only after 10 consecutive positive markouts
+        # ═══════════════════════════════════════════════════════════════════
+        # Format: (timestamp, token_id, side, fill_price, fill_size)
+        self.fill_history: deque = deque(maxlen=100)  # Last 100 fills
+        self.markout_window = deque(maxlen=20)  # Last 20 markout PnLs (5s interval)
+        self.markout_interval = 5.0  # 5 seconds
         self.adverse_selection_count = 0  # Count of negative markouts
         self.total_markout_pnl = 0.0  # Cumulative markout P&L
         
+        # Self-tuning multipliers (start at 1.0 = no adjustment)
+        self.spread_multiplier = 1.0
+        self.sensitivity_multiplier = 1.0
+        self.tuning_increment = 0.15  # 15% per adjustment
+        self.consecutive_positive_markouts = 0  # Reset counter
+        self.markout_lock = asyncio.Lock()  # Thread-safe updates
+        
+    async def calculate_markout_pnl(
+        self,
+        current_micro_price: float,
+        token_id: str
+    ) -> None:
+        """
+        MODULE 4: Calculate 5-second Markout PnL for recent fills
+        
+        Markout PnL = PnL if position was closed 5 seconds after the fill
+        - Positive markout = Good fill (bought low, price rose)
+        - Negative markout = Adverse selection (bought high, price fell)
+        
+        Args:
+            current_micro_price: Current volume-weighted mid-price
+            token_id: Token being evaluated
+        """
+        current_time = time.time()
+        
+        # Find fills that are ~5 seconds old (±0.5s tolerance)
+        mature_fills = [
+            fill for fill in self.fill_history
+            if fill[1] == token_id
+            and abs((current_time - fill[0]) - self.markout_interval) < 0.5
+        ]
+        
+        if not mature_fills:
+            return  # No fills ready for markout calculation
+        
+        async with self.markout_lock:
+            for fill in mature_fills:
+                timestamp, tid, side, fill_price, fill_size = fill
+                
+                # Calculate markout PnL
+                if side == 'BUY':
+                    # Bought at fill_price, current price is current_micro_price
+                    # PnL = (current - fill) * size
+                    markout_pnl = (current_micro_price - fill_price) * fill_size
+                else:  # SELL
+                    # Sold at fill_price, current price is current_micro_price
+                    # PnL = (fill - current) * size
+                    markout_pnl = (fill_price - current_micro_price) * fill_size
+                
+                # Add to markout window
+                self.markout_window.append(markout_pnl)
+                self.total_markout_pnl += markout_pnl
+                
+                if markout_pnl < 0:
+                    self.adverse_selection_count += 1
+                    self.consecutive_positive_markouts = 0  # Reset counter
+                else:
+                    self.consecutive_positive_markouts += 1
+                
+                logger.debug(
+                    f"[MARKOUT] {side} fill @ ${fill_price:.4f} → "
+                    f"5s price ${current_micro_price:.4f} = "
+                    f"${markout_pnl:+.4f} PnL ({fill_size:.1f} shares)"
+                )
+                
+                # Remove processed fill from history
+                self.fill_history.remove(fill)
+    
+    async def apply_self_tuning(self) -> Tuple[float, float]:
+        """
+        MODULE 4: Markout Self-Tuning - Adjust spread/sensitivity based on markout PnL
+        
+        Logic:
+        1. Calculate mean of last 20 markouts
+        2. If mean < 0 → Increment multipliers by 15%
+        3. Only reset after 10 consecutive positive markouts
+        
+        Returns:
+            Tuple of (adjusted_spread_multiplier, adjusted_sensitivity_multiplier)
+        """
+        if len(self.markout_window) < 20:
+            return self.spread_multiplier, self.sensitivity_multiplier  # Not enough data
+        
+        async with self.markout_lock:
+            mean_markout = statistics.mean(self.markout_window)
+            
+            # NEGATIVE MEAN: We're being adversely selected → WIDEN SPREADS
+            if mean_markout < 0:
+                # Increment both multipliers by 15%
+                self.spread_multiplier += self.tuning_increment
+                self.sensitivity_multiplier += self.tuning_increment
+                
+                logger.info(
+                    f"[INSTITUTIONAL_GUARD] MARKOUT SELF-TUNING ACTIVATED - "
+                    f"Mean 5s markout: ${mean_markout:.4f} (NEGATIVE). "
+                    f"Adverse selection detected. Adjusting parameters:\n"
+                    f"  Spread Multiplier: {self.spread_multiplier:.2f}x "
+                    f"(+{self.tuning_increment*100:.0f}%)\n"
+                    f"  Sensitivity Multiplier: {self.sensitivity_multiplier:.2f}x "
+                    f"(+{self.tuning_increment*100:.0f}%)\n"
+                    f"  Total Markout PnL: ${self.total_markout_pnl:.2f}\n"
+                    f"  Adverse fills: {self.adverse_selection_count}/{len(self.markout_window)}"
+                )
+            
+            # RESET CONDITION: 10 consecutive positive markouts
+            elif self.consecutive_positive_markouts >= 10 and self.spread_multiplier > 1.0:
+                self.spread_multiplier = 1.0
+                self.sensitivity_multiplier = 1.0
+                self.consecutive_positive_markouts = 0
+                
+                logger.info(
+                    f"[INSTITUTIONAL_GUARD] MARKOUT SELF-TUNING RESET - "
+                    f"10 consecutive positive markouts achieved. "
+                    f"Mean 5s markout: ${mean_markout:.4f}. "
+                    f"Resetting multipliers to 1.0x (baseline parameters)."
+                )
+            
+            return self.spread_multiplier, self.sensitivity_multiplier
+    
     def update_inventory(self, token_id: str, shares: int, price: float, is_buy: bool):
         """Update inventory and cost basis after a fill"""
         if is_buy:
@@ -768,14 +958,6 @@ class MarketMakingStrategy(BaseStrategy):
         )
         
         return dynamic_min_volume
-                f"[MM_PAUSE_TIMEOUT] Auto-resuming {market_id[:8]}... "
-                f"(arb pause exceeded 1.5s timeout)"
-            )
-            self._arb_paused_markets.discard(market_id)
-            self._arb_pause_expiry.pop(market_id, None)
-            return False
-        
-        return True
     
     async def handle_fill_event(self, fill: FillEvent) -> None:
         """

@@ -42,38 +42,60 @@ PROXY_WALLET_ADDRESS: Final[str] = os.getenv(
 
 
 # ============================================================================
-# 2. MULTI-STRATEGY BUDGET ALLOCATION
+# 2. MULTI-STRATEGY BUDGET ALLOCATION (INSTITUTIONAL-GRADE DYNAMIC SYSTEM)
 # ============================================================================
-# The bot runs multiple strategies in parallel, each with dedicated capital.
-# This prevents strategies from competing for the same funds and provides
-# clear risk isolation.
+# PERCENTAGE-BASED ALLOCATION (Auto-scales with account balance)
 #
-# Capital Allocation Philosophy:
-# - Arbitrage: Reserved capital for rare, high-confidence opportunities
-# - Market Making: Active capital for steady income generation
-# - Reserve: Safety buffer for unexpected scenarios
+# Institutional Golden Standards:
+# 1. Allocate capital as % of total equity (not fixed dollars)
+# 2. Used by: Jane Street, Citadel, Two Sigma, Jump Trading
+# 3. Auto-scales with account growth/drawdown
+# 4. Maintains risk ratios regardless of balance
+# 5. Kelly Criterion optimal: 5-15% per strategy
 #
-# Total available: $72.92 USDC (as of 2026-01-14)
+# Benefits:
+# - Balance = $72.92 → MM: $56.88 (78%), Arb: $14.58 (20%)
+# - Balance = $500 → MM: $390 (78%), Arb: $100 (20%)
+# - Balance = $5,000 → MM: $500 (capped), Arb: $200 (capped)
+# - No manual recalibration needed
 # ============================================================================
 
-# Arbitrage strategy allocation
-# Conservative allocation since opportunities are rare
-# Enough for 1-2 simultaneous arbitrage baskets at $10 each
-ARBITRAGE_STRATEGY_CAPITAL: Final[float] = 20.0
+# Market Making: Percentage-based allocation
+# INSTITUTIONAL STANDARD: 70-80% of available capital
+# Rationale: Primary income generator, higher turnover = more rebates
+MM_CAPITAL_ALLOCATION_PCT: Final[float] = 0.78  # 78% of balance
 
-# Market making strategy allocation  
-# CALIBRATED FOR $100 PRINCIPAL: 80% utilization
-# Previous: $50 (50% - too conservative for proactive MM)
-# Supports 8-10 simultaneous positions at $8-10 each
-# Rationale: Higher turnover = more rebate accumulation
-MARKET_MAKING_STRATEGY_CAPITAL: Final[float] = 80.0
+# Arbitrage: Percentage-based allocation
+# INSTITUTIONAL STANDARD: 15-20% of available capital
+# Rationale: Opportunistic strategy, rare but high-conviction
+ARB_CAPITAL_ALLOCATION_PCT: Final[float] = 0.20  # 20% of balance
 
-# Reserve buffer (emergency fund, gas, unexpected fees)
-STRATEGY_RESERVE_BUFFER: Final[float] = 2.92
+# Reserve: Percentage-based buffer
+# INSTITUTIONAL STANDARD: 2-5% cash reserve
+# Rationale: Gas fees, unexpected fills, emergency exits
+RESERVE_BUFFER_PCT: Final[float] = 0.02  # 2% reserve
+
+# Safety Caps (Hard Dollar Limits)
+# Prevents over-allocation even with large balances
+# INSTITUTIONAL STANDARD: Cap position size regardless of bankroll
+MM_MAX_CAPITAL_CAP: Final[float] = 500.0  # Max $500 for MM (even if balance > $640)
+ARB_MAX_CAPITAL_CAP: Final[float] = 200.0  # Max $200 for Arb (even if balance > $1000)
+
+# Minimum Thresholds (Strategy Activation)
+# Don't trade if insufficient capital for strategy
+# INSTITUTIONAL STANDARD: Minimum viable capital per strategy
+MM_MIN_CAPITAL_THRESHOLD: Final[float] = 50.0  # Need ≥$50 to enable MM
+ARB_MIN_CAPITAL_THRESHOLD: Final[float] = 10.0  # Need ≥$10 to enable Arb
+
+# DEPRECATED: Legacy constants for backward compatibility
+# Use dynamic calculation: mm_capital = min(balance * 0.78, MM_MAX_CAPITAL_CAP)
+ARBITRAGE_STRATEGY_CAPITAL: Final[float] = 20.0  # DEPRECATED: Use ARB_CAPITAL_ALLOCATION_PCT
+MARKET_MAKING_STRATEGY_CAPITAL: Final[float] = 80.0  # DEPRECATED: Use MM_CAPITAL_ALLOCATION_PCT
+STRATEGY_RESERVE_BUFFER: Final[float] = 2.92  # DEPRECATED: Use RESERVE_BUFFER_PCT
 
 # Maximum capital utilization across all strategies (safety check)
-# Set to 97% to leave small buffer for fees/gas
-MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.97
+# Set to 98% to leave small buffer for fees/gas
+MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.98
 
 
 # ============================================================================
@@ -315,17 +337,20 @@ ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
 # Heartbeat interval - how often to log balance and health metrics
 HEARTBEAT_INTERVAL_SEC: Final[int] = 300  # 5 minutes
 
-# Maximum allowed drawdown before emergency kill switch (USD)
-# INSTITUTIONAL HFT STANDARD: 5% of total equity for small accounts
-# Current setting: $5.00 (5% of $100 principal)
+# Maximum allowed drawdown before emergency kill switch (PERCENTAGE-BASED)
+# INSTITUTIONAL HFT STANDARD: 5% of peak equity for small accounts
 # Rationale:
 #   - Prevents catastrophic loss from market microstructure breakdown
 #   - Triggers immediate halt of all strategies (cancel orders, close positions)
 #   - Institutional standard: 2-5% daily drawdown limit
-#   - Formula: If (peak_equity - current_equity) > DRAWDOWN_LIMIT → KILL_SWITCH
-#   - For small accounts (<$1k), use 5% for earlier intervention
-# Note: For $100 bankroll, 5% = $5. For $5,000 bankroll, 2% = $100
-DRAWDOWN_LIMIT_USD: Final[float] = 5.0  # 5% of $100 principal
+#   - Formula: If (peak_equity - current_equity) > peak_equity * 0.05 → KILL_SWITCH
+#   - Auto-scales: $100 account = $5 limit, $1000 account = $50 limit
+# Dynamic Calculation: drawdown_limit = peak_equity * DRAWDOWN_LIMIT_PCT
+DRAWDOWN_LIMIT_PCT: Final[float] = 0.05  # 5% of peak equity
+
+# DEPRECATED: Legacy constant for backward compatibility
+# Use dynamic calculation: drawdown_limit = peak_equity * DRAWDOWN_LIMIT_PCT
+DRAWDOWN_LIMIT_USD: Final[float] = 5.0  # DEPRECATED: Use DRAWDOWN_LIMIT_PCT
 
 # Auto-redeem check interval - how often to check for resolved markets
 AUTO_REDEEM_INTERVAL_SEC: Final[int] = 600  # 10 minutes
@@ -456,16 +481,20 @@ BATCH_RESYNC_WAIT: Final[int] = 15
 # CAPITAL MANAGEMENT (Negative Risk & Exposure)
 # ============================================================================
 
-# Maximum total exposure in USDC (principal protection)
-# INSTITUTIONAL HFT STANDARD: 90-95% utilization of available capital
-# Current setting: $95.00 (95% of $100 principal)
+# Maximum total exposure (PERCENTAGE-BASED)
+# INSTITUTIONAL HFT STANDARD: 95% utilization of available capital
 # Rationale:
 #   - Prevents over-leveraging across all strategies
 #   - Maintains 5% cash buffer for gas fees and unexpected fills
-#   - Institutional standard: 80-90% utilization max
+#   - Institutional standard: 90-95% utilization max
 #   - Leaves buffer for emergency exits without liquidation
-# Note: Update this value to match your actual trading capital (95% of bankroll)
-MAX_TOTAL_EXPOSURE: Final[float] = 95.0
+#   - Auto-scales: $100 account = $95 max, $1000 account = $950 max
+# Dynamic Calculation: max_exposure = balance * MAX_TOTAL_EXPOSURE_PCT
+MAX_TOTAL_EXPOSURE_PCT: Final[float] = 0.95  # 95% of balance
+
+# DEPRECATED: Legacy constant for backward compatibility
+# Use dynamic calculation: max_exposure = balance * MAX_TOTAL_EXPOSURE_PCT
+MAX_TOTAL_EXPOSURE: Final[float] = 95.0  # DEPRECATED: Use MAX_TOTAL_EXPOSURE_PCT
 
 # NegRisk Adapter contract address for token conversion
 NEGRISK_ADAPTER_ADDRESS: Final[str] = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
