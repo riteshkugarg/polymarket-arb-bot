@@ -199,43 +199,47 @@ class InventoryManager:
     
     def get_dynamic_gamma(self, token_id: str) -> Decimal:
         """
-        Calculate volatility-adaptive gamma using institutional formula.
+        Calculate volatility-adaptive gamma using 2026 institutional formula.
         
-        Mathematical Formula:
+        Mathematical Formula (2026 Gold Standard):
         $$
         \\gamma_{dynamic} = \\gamma_{base} \\cdot \\left(1 + \\frac{\\sigma_{current}}{\\sigma_{baseline}}\\right)
         $$
         
         Where:
-        - $\\gamma_{base}$: Static risk aversion parameter (default: 0.2)
+        - $\\gamma_{base}$: MM_GAMMA_BASE = 0.1 (aggressive fills in low vol)
+        - $\\gamma_{max}$: MM_GAMMA_MAX = 0.5 (defensive cap in extreme vol)
         - $\\sigma_{current}$: 1-minute EMA volatility (recent market stress)
         - $\\sigma_{baseline}$: 24-hour rolling average volatility (normal regime)
         
-        Institutional Logic:
-        -------------------
-        - Low volatility (σ_current < σ_baseline): γ_dynamic ≈ γ_base (neutral quoting)
-        - Normal volatility (σ_current = σ_baseline): γ_dynamic = 2 * γ_base (standard risk)
-        - High volatility (σ_current > σ_baseline): γ_dynamic > 2 * γ_base (defensive posture)
+        2026 Institutional Logic:
+        ------------------------
+        - Low volatility (σ_current < σ_baseline): γ → 0.1 (aggressive fills)
+        - Normal volatility (σ_current = σ_baseline): γ = 0.2 (balanced)
+        - High volatility (σ_current = 2× σ_baseline): γ = 0.3 (defensive)
+        - Extreme volatility: γ capped at MM_GAMMA_MAX = 0.5
         
-        Example:
-        --------
-        γ_base = 0.2, σ_baseline = 0.05, σ_current = 0.10
-        γ_dynamic = 0.2 * (1 + 0.10 / 0.05) = 0.2 * 3 = 0.6
+        Example (2026 Gold Standard):
+        ----------------------------
+        γ_base = 0.1, γ_max = 0.5, σ_baseline = 0.05, σ_current = 0.10
+        γ_dynamic = 0.1 × (1 + 0.10/0.05) = 0.1 × 3 = 0.3 (capped at 0.5)
         
-        This increases reservation price skew during volatile markets,
-        causing wider spreads and reduced inventory accumulation.
+        This provides wider spreads during volatile markets while maintaining
+        competitive fills during normal conditions.
         
         Args:
             token_id: Token to calculate dynamic gamma for
             
         Returns:
-            Volatility-adjusted gamma parameter
+            Volatility-adjusted gamma parameter (capped at MM_GAMMA_MAX)
             
         Raises:
             None: Falls back to gamma_base if insufficient data
         """
+        from config.constants import MM_GAMMA_BASE, MM_GAMMA_MAX
+        
         if not self.use_dynamic_gamma:
-            return self.gamma_base
+            return Decimal(str(MM_GAMMA_BASE))
         
         # Get current and baseline volatility
         sigma_current = self._current_volatility.get(token_id)
@@ -244,22 +248,25 @@ class InventoryManager:
         # Fall back to base gamma if insufficient data
         if sigma_current is None or sigma_baseline is None or sigma_baseline == 0:
             logger.debug(
-                f"[{token_id[:8]}] Insufficient volatility data - using base gamma {self.gamma_base}"
+                f"[{token_id[:8]}] Insufficient volatility data - using base gamma {MM_GAMMA_BASE}"
             )
-            return self.gamma_base
+            return Decimal(str(MM_GAMMA_BASE))
         
         # Calculate dynamic gamma: γ_dynamic = γ_base * (1 + σ_current / σ_baseline)
-        vol_ratio = sigma_current / sigma_baseline
-        gamma_dynamic = self.gamma_base * (Decimal('1') + vol_ratio)
+        gamma_base_decimal = Decimal(str(MM_GAMMA_BASE))
+        gamma_max_decimal = Decimal(str(MM_GAMMA_MAX))
         
-        # Cap gamma at 3x base to prevent over-conservative quoting
-        gamma_max = self.gamma_base * Decimal('3')
-        gamma_dynamic = min(gamma_dynamic, gamma_max)
+        vol_ratio = sigma_current / sigma_baseline
+        gamma_dynamic = gamma_base_decimal * (Decimal('1') + vol_ratio)
+        
+        # Cap gamma at MM_GAMMA_MAX (2026 institutional standard)
+        gamma_dynamic = min(gamma_dynamic, gamma_max_decimal)
         
         logger.debug(
             f"[{token_id[:8]}] Dynamic gamma: {gamma_dynamic:.4f} "
-            f"(base: {self.gamma_base:.4f}, σ_current: {sigma_current:.4f}, "
-            f"σ_baseline: {sigma_baseline:.4f}, ratio: {vol_ratio:.2f}x)"
+            f"(base: {MM_GAMMA_BASE:.4f}, max: {MM_GAMMA_MAX:.4f}, "
+            f"σ_current: {sigma_current:.4f}, σ_baseline: {sigma_baseline:.4f}, "
+            f"ratio: {vol_ratio:.2f}x)"
         )
         
         return gamma_dynamic

@@ -112,6 +112,7 @@ from config.constants import (
 )
 from utils.logger import get_logger
 from utils.exceptions import StrategyError
+from utils.rate_limiter import TokenBucketRateLimiter, ORDER_PLACEMENT_RATE_LIMITER
 
 
 logger = get_logger(__name__)
@@ -2220,8 +2221,24 @@ class MarketMakingStrategy(BaseStrategy):
         3. Calculate skewed quotes (inventory + mean reversion)
         4. Place orders atomically (bid + ask simultaneously)
         """
-        if time.time() - self._last_order_time < MM_MIN_ORDER_SPACING:
-            await asyncio.sleep(MM_MIN_ORDER_SPACING)
+        # ═══════════════════════════════════════════════════════════════════
+        # INSTITUTIONAL UPGRADE: TOKEN-BUCKET RATE LIMITER (2026 Gold Standard)
+        # ═══════════════════════════════════════════════════════════════════
+        # Replaced static sleep timer with token-bucket algorithm
+        #
+        # Advantages:
+        # - Allows bursts up to bucket capacity (20 requests)
+        # - Smoother rate limiting (no fixed 2-second delays)
+        # - Better API utilization (fills "holes" in traffic)
+        # - Industry standard (Jane Street, Citadel, Two Sigma)
+        #
+        # Configuration:
+        # - Sustained rate: 10 req/sec (well below Polymarket's 3500/10s burst limit)
+        # - Burst capacity: 20 requests (allows rapid order replacement)
+        # - Auto-refills: Continuously adds tokens at 10/sec rate
+        #
+        # Previous: Static sleep (MM_MIN_ORDER_SPACING = 2s) - too rigid
+        await ORDER_PLACEMENT_RATE_LIMITER.acquire(cost=1.0)
         
         # ═══════════════════════════════════════════════════════════════════
         # INSTITUTIONAL CIRCUIT BREAKER: LATENCY-BASED KILL SWITCH (2026)
