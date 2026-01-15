@@ -148,8 +148,9 @@ class InventoryManager:
         self,
         max_position_per_market: Decimal = Decimal('5000'),  # $5k per market
         max_gross_exposure: Decimal = Decimal('50000'),      # $50k total
-        gamma: Decimal = Decimal('0.2'),                     # Risk aversion (0.1-0.5)
-        volatility_lookback_seconds: int = 3600              # 1 hour volatility window
+        gamma: Decimal = Decimal('0.2'),                     # Base risk aversion (0.1-0.5)
+        volatility_lookback_seconds: int = 3600,             # 1 hour volatility window
+        use_dynamic_gamma: bool = True                       # Enable volatility-adaptive gamma
     ):
         """
         Initialize inventory manager
@@ -157,8 +158,9 @@ class InventoryManager:
         Args:
             max_position_per_market: Max notional value per market
             max_gross_exposure: Max total gross exposure across all markets
-            gamma: Risk aversion parameter (higher = more conservative)
+            gamma: Base risk aversion parameter (higher = more conservative)
             volatility_lookback_seconds: Window for volatility calculation
+            use_dynamic_gamma: Enable volatility-adaptive gamma scaling
         """
         self._positions: Dict[str, Position] = {}  # token_id -> Position
         self._lock = asyncio.Lock()
@@ -166,11 +168,22 @@ class InventoryManager:
         # Risk parameters
         self.max_position_per_market = max_position_per_market
         self.max_gross_exposure = max_gross_exposure
-        self.gamma = gamma
+        self.gamma_base = gamma  # Base gamma (γ_base)
         self.volatility_lookback_seconds = volatility_lookback_seconds
+        self.use_dynamic_gamma = use_dynamic_gamma
         
         # Price history for volatility calculation (token_id -> deque of (timestamp, price))
         self._price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        
+        # Volatility tracking for dynamic gamma
+        # Baseline: 24-hour rolling average
+        self._baseline_volatility: Dict[str, Decimal] = {}  # token_id -> σ_baseline
+        self._baseline_vol_window_seconds = 24 * 3600  # 24 hours
+        
+        # Current: 1-minute EMA
+        self._current_volatility: Dict[str, Decimal] = {}  # token_id -> σ_current
+        self._current_vol_window_seconds = 60  # 1 minute
+        self._last_vol_update: Dict[str, float] = {}  # token_id -> timestamp
         
         # Metrics
         self._trade_count = 0
@@ -180,8 +193,183 @@ class InventoryManager:
             f"InventoryManager initialized - "
             f"Max per market: ${max_position_per_market}, "
             f"Max gross: ${max_gross_exposure}, "
-            f"Gamma: {gamma}"
+            f"Base Gamma: {gamma}, "
+            f"Dynamic Gamma: {'ENABLED' if use_dynamic_gamma else 'DISABLED'}"
         )
+    
+    def get_dynamic_gamma(self, token_id: str) -> Decimal:
+        """
+        Calculate volatility-adaptive gamma using institutional formula.
+        
+        Mathematical Formula:
+        $$
+        \\gamma_{dynamic} = \\gamma_{base} \\cdot \\left(1 + \\frac{\\sigma_{current}}{\\sigma_{baseline}}\\right)
+        $$
+        
+        Where:
+        - $\\gamma_{base}$: Static risk aversion parameter (default: 0.2)
+        - $\\sigma_{current}$: 1-minute EMA volatility (recent market stress)
+        - $\\sigma_{baseline}$: 24-hour rolling average volatility (normal regime)
+        
+        Institutional Logic:
+        -------------------
+        - Low volatility (σ_current < σ_baseline): γ_dynamic ≈ γ_base (neutral quoting)
+        - Normal volatility (σ_current = σ_baseline): γ_dynamic = 2 * γ_base (standard risk)
+        - High volatility (σ_current > σ_baseline): γ_dynamic > 2 * γ_base (defensive posture)
+        
+        Example:
+        --------
+        γ_base = 0.2, σ_baseline = 0.05, σ_current = 0.10
+        γ_dynamic = 0.2 * (1 + 0.10 / 0.05) = 0.2 * 3 = 0.6
+        
+        This increases reservation price skew during volatile markets,
+        causing wider spreads and reduced inventory accumulation.
+        
+        Args:
+            token_id: Token to calculate dynamic gamma for
+            
+        Returns:
+            Volatility-adjusted gamma parameter
+            
+        Raises:
+            None: Falls back to gamma_base if insufficient data
+        """
+        if not self.use_dynamic_gamma:
+            return self.gamma_base
+        
+        # Get current and baseline volatility
+        sigma_current = self._current_volatility.get(token_id)
+        sigma_baseline = self._baseline_volatility.get(token_id)
+        
+        # Fall back to base gamma if insufficient data
+        if sigma_current is None or sigma_baseline is None or sigma_baseline == 0:
+            logger.debug(
+                f"[{token_id[:8]}] Insufficient volatility data - using base gamma {self.gamma_base}"
+            )
+            return self.gamma_base
+        
+        # Calculate dynamic gamma: γ_dynamic = γ_base * (1 + σ_current / σ_baseline)
+        vol_ratio = sigma_current / sigma_baseline
+        gamma_dynamic = self.gamma_base * (Decimal('1') + vol_ratio)
+        
+        # Cap gamma at 3x base to prevent over-conservative quoting
+        gamma_max = self.gamma_base * Decimal('3')
+        gamma_dynamic = min(gamma_dynamic, gamma_max)
+        
+        logger.debug(
+            f"[{token_id[:8]}] Dynamic gamma: {gamma_dynamic:.4f} "
+            f"(base: {self.gamma_base:.4f}, σ_current: {sigma_current:.4f}, "
+            f"σ_baseline: {sigma_baseline:.4f}, ratio: {vol_ratio:.2f}x)"
+        )
+        
+        return gamma_dynamic
+    
+    async def update_volatility(self, token_id: str, price: Decimal) -> None:
+        """
+        Update volatility estimates for dynamic gamma calculation.
+        
+        Updates two metrics:
+        1. Baseline volatility: 24-hour rolling average (σ_baseline)
+        2. Current volatility: 1-minute EMA (σ_current)
+        
+        Mathematical Formula (Log Returns):
+        $$
+        r_t = \\ln\\left(\\frac{P_t}{P_{t-1}}\\right)
+        $$
+        
+        $$
+        \\sigma = \\sqrt{\\frac{1}{N}\\sum_{i=1}^{N}(r_i - \\bar{r})^2} \\cdot \\sqrt{T}
+        $$
+        
+        Where:
+        - $r_t$: Log return at time t
+        - $\\sigma$: Annualized volatility
+        - $T$: Annualization factor (minutes per year = 525,600)
+        
+        Args:
+            token_id: Token to update volatility for
+            price: Current market price
+            
+        Returns:
+            None
+        """
+        now = time.time()
+        
+        # Throttle updates to once per second
+        last_update = self._last_vol_update.get(token_id, 0)
+        if now - last_update < 1.0:
+            return
+        
+        self._last_vol_update[token_id] = now
+        
+        # Update baseline volatility (24-hour window)
+        baseline_vol = self._calculate_volatility_window(
+            token_id,
+            window_seconds=self._baseline_vol_window_seconds
+        )
+        if baseline_vol is not None:
+            self._baseline_volatility[token_id] = baseline_vol
+        
+        # Update current volatility (1-minute window)
+        current_vol = self._calculate_volatility_window(
+            token_id,
+            window_seconds=self._current_vol_window_seconds
+        )
+        if current_vol is not None:
+            self._current_volatility[token_id] = current_vol
+    
+    def _calculate_volatility_window(
+        self,
+        token_id: str,
+        window_seconds: int
+    ) -> Optional[Decimal]:
+        """
+        Calculate volatility for a specific time window.
+        
+        Args:
+            token_id: Token to calculate volatility for
+            window_seconds: Time window in seconds
+            
+        Returns:
+            Annualized volatility or None if insufficient data
+        """
+        history = self._price_history.get(token_id)
+        if not history or len(history) < 10:
+            return None
+        
+        # Filter to window
+        cutoff_time = time.time() - window_seconds
+        recent_prices = [
+            (ts, price) for ts, price in history
+            if ts >= cutoff_time
+        ]
+        
+        if len(recent_prices) < 10:
+            return None
+        
+        # Calculate log returns
+        log_returns = []
+        for i in range(1, len(recent_prices)):
+            p_prev = recent_prices[i-1][1]
+            p_curr = recent_prices[i][1]
+            
+            if p_prev > 0 and p_curr > 0:
+                log_return = (p_curr / p_prev).ln()
+                log_returns.append(log_return)
+        
+        if not log_returns:
+            return None
+        
+        # Calculate standard deviation
+        mean_return = sum(log_returns) / len(log_returns)
+        variance = sum((r - mean_return) ** 2 for r in log_returns) / len(log_returns)
+        volatility = variance.sqrt()
+        
+        # Annualize (assuming 1-minute sampling)
+        minutes_per_year = 365 * 24 * 60
+        volatility_annual = volatility * Decimal(str(minutes_per_year)).sqrt()
+        
+        return volatility_annual
     
     async def record_trade(
         self,
@@ -218,6 +406,9 @@ class InventoryManager:
             
             # Record price for volatility calculation
             self._price_history[token_id].append((time.time(), price))
+            
+            # Update volatility estimates for dynamic gamma
+            await self.update_volatility(token_id, price)
             
             logger.debug(
                 f"[{token_id[:8]}] {side} {shares} @ ${price:.4f} - "
@@ -304,9 +495,28 @@ class InventoryManager:
         time_to_expiry_hours: Optional[float] = None
     ) -> Decimal:
         """
-        Calculate Avellaneda-Stoikov inventory skew penalty
+        Calculate Avellaneda-Stoikov inventory skew penalty with dynamic gamma.
         
-        Formula: skew = γ × inventory × σ² × T
+        Mathematical Formula:
+        $$
+        \\text{skew} = \\gamma_{dynamic} \\cdot q \\cdot \\sigma^2 \\cdot T \\cdot p_{mid}
+        $$
+        
+        Where:
+        - $\\gamma_{dynamic}$: Volatility-adaptive risk aversion (from get_dynamic_gamma)
+        - $q$: Inventory position in shares (positive = long, negative = short)
+        - $\\sigma^2$: Market volatility squared (variance)
+        - $T$: Time to expiry, normalized ∈ [0, 1]
+        - $p_{mid}$: Current mid price (for price unit conversion)
+        
+        Institutional Logic:
+        -------------------
+        The skew adjustment shifts the reservation price away from mid:
+        - If LONG inventory (q > 0): skew > 0 → reservation price LOWER → incentivize selling
+        - If SHORT inventory (q < 0): skew < 0 → reservation price HIGHER → incentivize buying
+        
+        The dynamic gamma amplifies this effect during high volatility regimes,
+        causing more aggressive inventory flattening when markets are stressed.
         
         Args:
             token_id: Token to calculate skew for
@@ -320,6 +530,9 @@ class InventoryManager:
         if not position or position.is_flat:
             return Decimal('0')
         
+        # Get dynamic gamma (volatility-adaptive)
+        gamma = self.get_dynamic_gamma(token_id)
+        
         # Calculate volatility (sigma)
         volatility = self._calculate_volatility(token_id)
         if volatility is None:
@@ -332,18 +545,18 @@ class InventoryManager:
         
         T = Decimal(str(min(time_to_expiry_hours / 24.0, 1.0)))  # Normalize to [0, 1]
         
-        # Calculate skew: γ × inventory × σ² × T
+        # Calculate skew: γ_dynamic × inventory × σ² × T
         inventory = position.shares
         sigma_squared = volatility * volatility
         
-        skew = self.gamma * inventory * sigma_squared * T
+        skew = gamma * inventory * sigma_squared * T
         
         # Scale by mid price (convert to price units)
         skew_in_price = skew * mid_price
         
         logger.debug(
             f"[{token_id[:8]}] Inventory skew: {skew_in_price:.6f} "
-            f"(inventory={inventory}, vol={volatility:.4f}, T={T:.2f})"
+            f"(inventory={inventory}, γ_dynamic={gamma:.4f}, vol={volatility:.4f}, T={T:.2f})"
         )
         
         return skew_in_price

@@ -497,19 +497,51 @@ class PolymarketWSManager:
             await self._rehydrate_state()
     
     async def _heartbeat_loop(self) -> None:
-        """Send PING every heartbeat_interval seconds"""
+        """
+        Send PING every heartbeat_interval seconds and measure latency.
+        
+        Institutional Feature:
+        - Tracks round-trip latency (PING → PONG)
+        - Exposes get_latency_ms() for trading strategies
+        - Used by latency-based kill switches
+        """
         while self._is_running:
             try:
                 await asyncio.sleep(self.heartbeat_interval)
                 
                 if self._is_connected and self._ws:
-                    await self._ws.ping()
-                    logger.debug("WebSocket PING sent")
+                    # Measure latency: send PING and wait for PONG
+                    ping_start = time.time()
+                    pong_waiter = await self._ws.ping()
+                    await asyncio.wait_for(pong_waiter, timeout=2.0)
+                    latency_ms = (time.time() - ping_start) * 1000
                     
+                    # Store latency for monitoring
+                    if not hasattr(self, '_last_latency_ms'):
+                        self._last_latency_ms = latency_ms
+                    else:
+                        # EMA: 0.9 * old + 0.1 * new
+                        self._last_latency_ms = 0.9 * self._last_latency_ms + 0.1 * latency_ms
+                    
+                    logger.debug(f"WebSocket PING/PONG: {latency_ms:.1f}ms")
+                    
+            except asyncio.TimeoutError:
+                logger.warning("Heartbeat timeout - no PONG received")
+                self._is_connected = False
+                await self._handle_reconnect()
             except Exception as e:
                 logger.warning(f"Heartbeat error: {e}")
                 self._is_connected = False
                 await self._handle_reconnect()
+    
+    def get_latency_ms(self) -> Optional[float]:
+        """
+        Get current WebSocket latency in milliseconds.
+        
+        Returns:
+            EMA-smoothed latency or None if no measurements yet
+        """
+        return getattr(self, '_last_latency_ms', None)
     
     async def _receive_loop(self) -> None:
         """Receive messages from WebSocket and route to queues"""

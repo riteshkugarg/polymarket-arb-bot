@@ -22,7 +22,7 @@ Usage:
 """
 
 from typing import Dict
-from src.config.constants import (
+from config.constants import (
     MM_CAPITAL_ALLOCATION_PCT,
     ARB_CAPITAL_ALLOCATION_PCT,
     RESERVE_BUFFER_PCT,
