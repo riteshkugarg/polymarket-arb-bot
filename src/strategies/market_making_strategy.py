@@ -1500,13 +1500,20 @@ class MarketMakingStrategy(BaseStrategy):
                             break
                         
                         response = await resp.json()
-                        page_markets = response.get('data', [])
+                        
+                        # Gamma API returns list directly, not {'data': [...]}
+                        if isinstance(response, list):
+                            page_markets = response
+                            next_cursor = 'END'  # No pagination for list response
+                        else:
+                            # Handle dict response with pagination
+                            page_markets = response.get('data', [])
+                            next_cursor = response.get('next_cursor', 'END')
                         
                         if not page_markets:
                             break
                         
                         all_markets.extend(page_markets)
-                        next_cursor = response.get('next_cursor', 'END')
                         
                         logger.debug(f"Fetched Gamma API page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
             
