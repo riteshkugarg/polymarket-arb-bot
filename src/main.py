@@ -73,6 +73,8 @@ from config.constants import (
     BATCH_DELAYED_LEG_HOLD_SEC,
     CANCEL_DELAYED_ON_SHUTDOWN,
     CLOB_API_URL,
+    ARBITRAGE_STRATEGY_CAPITAL,
+    MARKET_MAKING_STRATEGY_CAPITAL,
 )
 from utils.logger import get_logger, setup_logging
 from utils.rebate_logger import get_rebate_logger
