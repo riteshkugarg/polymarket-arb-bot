@@ -618,12 +618,46 @@ class PolymarketWSManager:
             try:
                 data = await self._orderbook_queue.get()
                 
+                # Debug: Log first few order book messages
+                if not hasattr(self, '_debug_ob_count'):
+                    self._debug_ob_count = 0
+                if self._debug_ob_count < 3:
+                    event_type = data.get('event_type', 'unknown')
+                    logger.info(f"[WS DEBUG] Processing {event_type}: keys={list(data.keys())}, data preview={str(data)[:200]}")
+                    self._debug_ob_count += 1
+                
                 # Parse order book data
-                asset_id = data.get('asset_id') or data.get('market')
+                # Per Polymarket support: messages use 'market' field (not 'asset_id')
+                asset_id = data.get('market') or data.get('asset_id')
                 if not asset_id:
+                    logger.warning(f"[WS] Message missing 'market' field: {data}")
                     continue
                 
-                # Extract order book data
+                event_type = data.get('event_type')
+                
+                # Handle different event types
+                if event_type == 'price_change':
+                    # Price change events: {"market": "...", "price_changes": [...], "timestamp": ...}
+                    price_changes = data.get('price_changes', [])
+                    if not price_changes:
+                        continue
+                    
+                    # Update cache with price changes (no full order book)
+                    for change in price_changes:
+                        token_id = change.get('token_id')
+                        price = change.get('price')
+                        if token_id and price:
+                            # Simple price update without full book
+                            self.cache.update_market_prices(
+                                asset_id=token_id,
+                                best_bid=float(price),
+                                best_ask=float(price),
+                                mid_price=float(price),
+                                timestamp=time.time()
+                            )
+                    continue
+                
+                # Extract order book data (for 'book' events)
                 # Per Polymarket support: book events use 'buys' and 'sells' (not bids/asks)
                 bids = data.get('buys', data.get('bids', []))  # Try 'buys' first, fallback to 'bids'
                 asks = data.get('sells', data.get('asks', []))  # Try 'sells' first, fallback to 'asks'
