@@ -1506,7 +1506,6 @@ class MarketMakingStrategy(BaseStrategy):
                 'null_volume': 0,
                 'inactive': 0,
                 'low_liquidity': 0,
-                'not_accepting_orders': 0,
                 'clob_disabled': 0,
                 'tick_size_too_wide': 0,
                 'min_order_too_large': 0,
@@ -1538,20 +1537,20 @@ class MarketMakingStrategy(BaseStrategy):
                 f"   ADAPTIVE FILTER: Dynamic Min Volume = ${dynamic_threshold:.2f}/day\n"
                 f"   (Balance: ${self._allocated_capital:.2f} / {MM_MAX_MARKETS} markets × {MM_VOLUME_MULTIPLIER}x, floor: ${MM_HARD_FLOOR_VOLUME})\n"
                 f"   \n"
-                f"   MICROSTRUCTURE REJECTIONS:\n"
+                f"   MICROSTRUCTURE REJECTIONS (Gamma API - Official Field Names):\n"
                 f"   ❌ Not binary: {rejection_stats['not_binary']}\n"
-                f"   ❌ CLOB disabled: {rejection_stats.get('clob_disabled', 0)}\n"
-                f"   ❌ Not accepting orders: {rejection_stats['not_accepting_orders']}\n"
-                f"   ❌ Tick size too wide (>10¢): {rejection_stats.get('tick_size_too_wide', 0)}\n"
-                f"   ❌ Min order too large (>$10): {rejection_stats.get('min_order_too_large', 0)}\n"
+                f"   ❌ CLOB disabled (enableOrderBook=false): {rejection_stats.get('clob_disabled', 0)}\n"
+                f"   ❌ Tick size too wide (orderPriceMinTickSize >10¢): {rejection_stats.get('tick_size_too_wide', 0)}\n"
+                f"   ❌ Min order too large (orderMinSize >$10): {rejection_stats.get('min_order_too_large', 0)}\n"
                 f"   \n"
                 f"   DATA QUALITY REJECTIONS:\n"
-                f"   ❌ Null volume (no data): {rejection_stats.get('null_volume', 0)}\n"
+                f"   ❌ Null volume (volumeNum/volume24hr=null): {rejection_stats.get('null_volume', 0)}\n"
                 f"   ❌ Low volume (<${dynamic_threshold:.2f}): {rejection_stats['low_volume']}\n"
                 f"   ❌ Low liquidity (<${MM_MIN_LIQUIDITY_DEPTH}): {rejection_stats['low_liquidity']}\n"
                 f"   ❌ Inactive/closed: {rejection_stats['inactive']}\n"
                 f"   \n"
-                f"   ✅ PASSED ALL CHECKS: {rejection_stats['passed']}"
+                f"   ✅ PASSED ALL CHECKS: {rejection_stats['passed']}\n"
+                f"   📊 Using Polymarket Gamma API (camelCase): enableOrderBook, orderPriceMinTickSize, orderMinSize"
             )
             
             self._last_market_scan = current_time
@@ -1574,34 +1573,25 @@ class MarketMakingStrategy(BaseStrategy):
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return (False, 'not_binary')
         
-        # DEBUG: Log first market to identify actual field names
-        if not hasattr(self, '_debug_logged_market_fields'):
-            self._debug_logged_market_fields = True
-            logger.info(f"🔍 DEBUG: Market fields available: {list(market.keys())[:30]}")
-            logger.info(f"🔍 DEBUG: acceptingOrders={market.get('acceptingOrders')}, accepting_orders={market.get('accepting_orders')}")
-            logger.info(f"🔍 DEBUG: enable_order_book={market.get('enable_order_book')}, enableOrderBook={market.get('enableOrderBook')}")
-            logger.info(f"🔍 DEBUG: active={market.get('active')}, closed={market.get('closed')}")
-        
-        # MICROSTRUCTURE: CLOB status (try both snake_case and camelCase)
-        # DEFAULT TO TRUE: If field missing, assume market is available (conservative but practical)
-        accepting_orders = market.get('acceptingOrders', market.get('accepting_orders', True))
-        enable_order_book = market.get('enableOrderBook', market.get('enable_order_book', True))
-        
-        if not accepting_orders:
-            return (False, 'not_accepting_orders')
-        
-        if not enable_order_book:
+        # MICROSTRUCTURE: CLOB status (Gamma /markets API - camelCase per Polymarket Support)
+        # enableOrderBook (boolean | null) - Default True if null/missing
+        enable_order_book = market.get('enableOrderBook')
+        if enable_order_book is False:  # Explicitly False, not None
             return (False, 'clob_disabled')
         
-        # MICROSTRUCTURE: Validate tick size and minimum order size (try both naming conventions)
-        minimum_tick_size = market.get('minimumTickSize', market.get('minimum_tick_size', 0.01))
-        minimum_order_size = market.get('minimumOrderSize', market.get('minimum_order_size', 1.0))
+        # MICROSTRUCTURE: Tick size and order size (Gamma API field names)
+        # orderPriceMinTickSize (number | null)
+        # orderMinSize (number | null)
+        order_price_min_tick = market.get('orderPriceMinTickSize')
+        order_min_size = market.get('orderMinSize')
         
-        # Reject markets with unreasonable constraints (if data available)
-        if minimum_tick_size > 0.1:  # Tick size > 10 cents (too wide)
+        # Validate constraints (only if data available - null means unknown)
+        if order_price_min_tick is not None and order_price_min_tick > 0.1:
+            # Tick size > 10 cents (too wide for small accounts)
             return (False, 'tick_size_too_wide')
         
-        if minimum_order_size > 10.0:  # Min order > $10 (too large for small account)
+        if order_min_size is not None and order_min_size > 10.0:
+            # Min order > $10 (capital inefficient for $80 account)
             return (False, 'min_order_too_large')
         
         # VOLUME EXTRACTION: Use actual volume data (do NOT infer from liquidity)
@@ -1658,22 +1648,18 @@ class MarketMakingStrategy(BaseStrategy):
         if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
             return False
         
-        # MICROSTRUCTURE: CLOB status (try both naming conventions, default to True if missing)
-        accepting_orders = market.get('acceptingOrders', market.get('accepting_orders', True))
-        enable_order_book = market.get('enableOrderBook', market.get('enable_order_book', True))
-        
-        if not accepting_orders:
-            return False
-        if not enable_order_book:
+        # MICROSTRUCTURE: CLOB status (Gamma API - camelCase)
+        enable_order_book = market.get('enableOrderBook')
+        if enable_order_book is False:  # Explicitly disabled
             return False
         
-        # MICROSTRUCTURE: Validate constraints (try both naming conventions)
-        minimum_tick_size = market.get('minimumTickSize', market.get('minimum_tick_size', 0.01))
-        minimum_order_size = market.get('minimumOrderSize', market.get('minimum_order_size', 1.0))
+        # MICROSTRUCTURE: Constraints (Gamma API field names)
+        order_price_min_tick = market.get('orderPriceMinTickSize')
+        order_min_size = market.get('orderMinSize')
         
-        if minimum_tick_size > 0.1:  # >10¢ tick
+        if order_price_min_tick is not None and order_price_min_tick > 0.1:
             return False
-        if minimum_order_size > 10.0:  # >$10 min
+        if order_min_size is not None and order_min_size > 10.0:
             return False
         
         # Active market check
