@@ -1489,7 +1489,11 @@ class MarketMakingStrategy(BaseStrategy):
                     
                     # Build Gamma API URL
                     url = f"{POLYMARKET_GAMMA_API_URL}/markets"
-                    params = {'active': 'true'}  # Only active markets
+                    params = {
+                        'active': 'true',
+                        'closed': 'false',  # Only open markets
+                        'limit': '1000'     # Max markets per page
+                    }
                     if next_cursor:
                         params['next_cursor'] = next_cursor
                     
@@ -1599,9 +1603,9 @@ class MarketMakingStrategy(BaseStrategy):
             logger.info(f"🔍 liquidityNum={market.get('liquidityNum')}, liquidity={market.get('liquidity')}")
             logger.info(f"🔍 enableOrderBook={market.get('enableOrderBook')}, active={market.get('active')}, closed={market.get('closed')}")
         
-        # Binary market check
-        tokens = market.get('tokens', [])
-        if MM_PREFER_BINARY_MARKETS and len(tokens) != 2:
+        # Binary market check (Gamma API uses 'outcomes' not 'tokens')
+        outcomes = market.get('outcomes', [])
+        if MM_PREFER_BINARY_MARKETS and len(outcomes) != 2:
             return (False, 'not_binary')
         
         # MICROSTRUCTURE: CLOB status (Gamma API - Official per Polymarket Support)
