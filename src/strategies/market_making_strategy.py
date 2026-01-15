@@ -1833,17 +1833,25 @@ class MarketMakingStrategy(BaseStrategy):
     async def _select_next_market(self) -> Optional[Dict]:
         """Select next market to make"""
         for market in self._eligible_markets:
-            market_id = market.get('id')
+            # Use conditionId (full hash) as primary key, not id (numeric)
+            market_id = market.get('conditionId') or market.get('id')
             if market_id not in self._positions:
                 return market
         return None
     
     async def _start_market_making(self, market: Dict) -> None:
         """Start making market with global exposure check"""
-        market_id = market.get('id')
+        # CRITICAL: Use conditionId (required by get_market API), not id
+        market_id = market.get('conditionId') or market.get('id')
         question = market.get('question', 'Unknown')
-        tokens = market.get('tokens', [])
-        token_ids = [t.get('token_id') for t in tokens]
+        
+        # Parse clobTokenIds (JSON string from Gamma API)
+        import json
+        clob_token_ids_raw = market.get('clobTokenIds', [])
+        if isinstance(clob_token_ids_raw, str):
+            token_ids = json.loads(clob_token_ids_raw)
+        else:
+            token_ids = clob_token_ids_raw
         
         # CRITICAL: Check global directional exposure before adding new position
         total_exposure = await self._calculate_total_directional_exposure()
