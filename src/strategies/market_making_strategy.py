@@ -54,7 +54,7 @@ from config.constants import (
     
     # Market selection
     MM_MIN_MARKET_VOLUME_24H,
-    MM_MIN_LIQUIDITY,
+    MM_MIN_LIQUIDITY_DEPTH,
     MM_MIN_DEPTH_SHARES,
     MM_MAX_SPREAD_PERCENT,
     MM_PREFER_BINARY_MARKETS,
@@ -73,6 +73,10 @@ from config.constants import (
     
     # Risk management
     MM_MAX_LOSS_PER_POSITION,
+    MM_MAX_DIRECTIONAL_EXPOSURE_PER_MARKET,
+    MM_GAMMA_RISK_AVERSION,
+    MM_BOUNDARY_THRESHOLD_LOW,
+    MM_BOUNDARY_THRESHOLD_HIGH,
     MM_GLOBAL_DAILY_LOSS_LIMIT,
     MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE,
     MM_ORACLE_PRICE_DEVIATION_LIMIT,
@@ -370,7 +374,7 @@ class MarketMakingStrategy(BaseStrategy):
             f"Max markets: {MM_MAX_ACTIVE_MARKETS}, "
             f"Target spread: {MM_TARGET_SPREAD*100:.1f}%, "
             f"Min depth: {MM_MIN_DEPTH_SHARES} shares, "
-            f"Min liquidity: ${MM_MIN_LIQUIDITY}, "
+            f"Min liquidity depth: ${MM_MIN_LIQUIDITY_DEPTH}, "
             f"Min volume: ${MM_MIN_MARKET_VOLUME_24H}/day, "
             f"Max directional exposure: ${MM_MAX_TOTAL_DIRECTIONAL_EXPOSURE}"
         )
@@ -914,7 +918,7 @@ class MarketMakingStrategy(BaseStrategy):
             logger.info(
                 f"📊 MARKET MAKING ELIGIBILITY (scanned {len(all_markets)} markets):\n"
                 f"   ❌ Not binary: {rejection_stats['not_binary']}\n"
-                f"   ❌ Low liquidity (<${MM_MIN_LIQUIDITY}): {rejection_stats['low_liquidity']}\n"
+                f"   ❌ Low liquidity depth (<${MM_MIN_LIQUIDITY_DEPTH}): {rejection_stats['low_liquidity']}\n"
                 f"   ❌ Low volume (<${MM_MIN_MARKET_VOLUME_24H}): {rejection_stats['low_volume']}\n"
                 f"   ❌ Inactive/closed: {rejection_stats['inactive']}\n"
                 f"   ❌ NegRisk: {rejection_stats.get('negrisk', 0)} (NOW ENABLED - was filtered before)\n"
@@ -978,7 +982,7 @@ class MarketMakingStrategy(BaseStrategy):
         liquidity = market.get('liquidity', 0)
         volume_24h = market.get('volume24hr', 0)
         
-        has_liquidity = liquidity >= MM_MIN_LIQUIDITY
+        has_liquidity = liquidity >= MM_MIN_LIQUIDITY_DEPTH
         has_volume = volume_24h >= MM_MIN_MARKET_VOLUME_24H
         
         if not (has_liquidity or has_volume):

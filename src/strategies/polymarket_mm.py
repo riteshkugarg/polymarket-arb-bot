@@ -4,6 +4,11 @@ PolymarketMM - Avellaneda-Stoikov Market Maker for Binary Prediction Markets
 Implementation of the Avellaneda-Stoikov optimal market-making model adapted
 for Polymarket's binary outcome markets [0, 1].
 
+Institutional HFT Standards (2026):
+- Gamma (risk aversion): MM_GAMMA_RISK_AVERSION = 0.15
+- Boundary thresholds: [0.10, 0.90] for Bernoulli variance protection
+- NegRisk signature buffer: ±2 ticks tolerance
+
 Mathematical Framework:
 ═══════════════════════
 
@@ -12,7 +17,7 @@ Mathematical Framework:
    where:
    - s = mid-price
    - q = inventory position (positive = long, negative = short)
-   - γ = risk aversion parameter (default 0.25)
+   - γ = risk aversion parameter (institutional: 0.15)
    - σ = volatility (60-second rolling std dev)
 
 2. Optimal Spread:
@@ -55,6 +60,13 @@ from core.order_manager import OrderManager
 from core.market_data_manager import MarketDataManager, FillEvent
 from utils.logger import get_logger, log_trade_event
 from utils.exceptions import TradingError, CircuitBreakerError
+from config.constants import (
+    MM_GAMMA_RISK_AVERSION,
+    MM_BOUNDARY_THRESHOLD_LOW,
+    MM_BOUNDARY_THRESHOLD_HIGH,
+    NEGRISK_BUFFER_TICKS,
+    FEE_RATE_BPS_MAKER
+)
 
 
 logger = get_logger(__name__)
@@ -137,30 +149,42 @@ class BoundaryRiskEngine:
     - Toxic flow concentrates
     - Asymmetric risk/reward profile dominates
     
+    Boundary Thresholds (from constants.py):
+    - PASSIVE MODE: p < {:.2f} or p > {:.2f}
+    - Uses institutional HFT standards for risk management
+    
     Mathematical Framework:
     ═══════════════════════
     1. Boundary-Adjusted Volatility:
        σ_boundary = σ_base × (1 + k × boundary_proximity)
-       where k ∈ [1.5, 2.0] for p > 0.90 or p < 0.10
+       where k ∈ [1.5, 2.0] for extreme probabilities
     
     2. Exponential Inventory Penalty:
        penalty = q × γ × σ² × exp(α × |p - 0.5|)
        where α scales penalty exponentially near boundaries
     
     3. Asymmetric Spread:
-       spread_up = δ × (1 + (1 - p))  # Wider at high prices
-       spread_down = δ × (1 + p)       # Wider at low prices
-    
-    4. Price Magnet Detection:
-       If Δp > 5 ticks in <1 second → Passive mode
-    """
+    """.format(MM_BOUNDARY_THRESHOLD_LOW, MM_BOUNDARY_THRESHOLD_HIGH)
     
     def __init__(self):
-        # Boundary thresholds
-        self.EXTREME_HIGH_THRESHOLD = 0.90
-        self.EXTREME_LOW_THRESHOLD = 0.10
-        self.CRITICAL_HIGH_THRESHOLD = 0.95
+        """Initialize with institutional boundary thresholds from constants.py"""
+        self.boundary_low = MM_BOUNDARY_THRESHOLD_LOW  # 0.10
+        self.boundary_high = MM_BOUNDARY_THRESHOLD_HIGH  # 0.90
+        self.negrisk_buffer_ticks = NEGRISK_BUFFER_TICKS  # 2 ticks
+        self.maker_fee_bps = FEE_RATE_BPS_MAKER  # 0 bps (rebate baseline)
+    """.format(MM_BOUNDARY_THRESHOLD_LOW, MM_BOUNDARY_THRESHOLD_HIGH)
+    
+    def __init__(self):
+        """Initialize with institutional boundary thresholds from constants.py"""
+        # Boundary thresholds (from constants.py)
+        self.EXTREME_HIGH_THRESHOLD = MM_BOUNDARY_THRESHOLD_HIGH  # 0.90
+        self.EXTREME_LOW_THRESHOLD = MM_BOUNDARY_THRESHOLD_LOW   # 0.10
+        self.CRITICAL_HIGH_THRESHOLD = 0.95  # Ultra-extreme (5% from boundary)
         self.CRITICAL_LOW_THRESHOLD = 0.05
+        
+        # NegRisk and fee parameters (from constants.py)
+        self.negrisk_buffer_ticks = NEGRISK_BUFFER_TICKS  # 2 ticks
+        self.maker_fee_bps = FEE_RATE_BPS_MAKER  # 0 bps (rebate baseline)
         
         # Volatility adjustments
         self.BASE_VOL_MULTIPLIER = 1.5
@@ -175,10 +199,12 @@ class BoundaryRiskEngine:
         self.price_history: deque = deque(maxlen=100)  # Last 100 price updates
         
         logger.info(
-            "BoundaryRiskEngine initialized:\n"
+            "BoundaryRiskEngine initialized (institutional standards):\n"
             f"  Extreme thresholds: [{self.EXTREME_LOW_THRESHOLD}, {self.EXTREME_HIGH_THRESHOLD}]\n"
             f"  Critical thresholds: [{self.CRITICAL_LOW_THRESHOLD}, {self.CRITICAL_HIGH_THRESHOLD}]\n"
-            f"  Volatility multipliers: {self.BASE_VOL_MULTIPLIER}x - {self.EXTREME_VOL_MULTIPLIER}x"
+            f"  Volatility multipliers: {self.BASE_VOL_MULTIPLIER}x - {self.EXTREME_VOL_MULTIPLIER}x\n"
+            f"  NegRisk buffer: ±{self.negrisk_buffer_ticks} ticks\n"
+            f"  Maker fee: {self.maker_fee_bps} bps"
         )
     
     def analyze_boundary_condition(
@@ -556,12 +582,12 @@ class PolymarketMM:
         # Initialize Boundary Risk Engine
         self.boundary_engine = BoundaryRiskEngine()
         
-        # Configuration (with sensible defaults)
+        # Configuration (institutional standards)
         self.config = {
-            # Avellaneda-Stoikov parameters
-            'gamma_base': 0.25,  # Base risk aversion
-            'gamma_min': 0.1,    # Min gamma (aggressive)
-            'gamma_max': 0.5,    # Max gamma (conservative)
+            # Avellaneda-Stoikov parameters (from constants.py)
+            'gamma_base': MM_GAMMA_RISK_AVERSION,  # Institutional risk aversion (0.15)
+            'gamma_min': MM_GAMMA_RISK_AVERSION * 0.67,  # Min gamma (0.10 - aggressive)
+            'gamma_max': MM_GAMMA_RISK_AVERSION * 2.0,   # Max gamma (0.30 - conservative)
             'volatility_window_sec': 60,  # Rolling window for σ calculation
             'tick_range_for_kappa': 5,    # Ticks to analyze for κ
             
