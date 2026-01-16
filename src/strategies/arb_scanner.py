@@ -58,7 +58,11 @@ from enum import Enum
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
 from core.market_data_manager import MarketDataManager, MarketSnapshot
-from config.constants import ARBITRAGE_STRATEGY_CAPITAL, ARBITRAGE_TAKER_FEE_PERCENT
+from config.constants import (
+    ARBITRAGE_STRATEGY_CAPITAL,
+    ARBITRAGE_TAKER_FEE_PERCENT,
+    DATA_STALENESS_THRESHOLD,  # INSTITUTIONAL: Use global staleness constant
+)
 from utils.logger import get_logger
 from utils.exceptions import (
     OrderRejectionError,
@@ -103,6 +107,13 @@ MIN_ARBITRAGE_BUDGET_PER_BASKET = 5.0  # Min $5 per arbitrage basket
 # This ensures scanner budget matches allocated capital
 TOTAL_ARBITRAGE_BUDGET = ARBITRAGE_STRATEGY_CAPITAL  # Total budget from constants.py
 MINIMUM_PROFIT_THRESHOLD = 0.001  # Don't execute if profit < $0.001
+
+# INSTITUTIONAL UPGRADE (Phase 1): Microstructure Quality & Liquidity Standards
+# Per institutional audit - arbitrage needs per-leg quality validation
+MIN_ARB_LEG_LIQUIDITY_USD = 2.0  # Minimum $2 dollar liquidity per leg
+MAX_ARB_LEG_SPREAD_PERCENT = 0.10  # Maximum 10% spread per leg (looser than MM's 3%)
+MIN_ARB_LEG_BID = 0.02  # Reject extreme long-shot bids (same as MM)
+MAX_ARB_LEG_ASK = 0.98  # Reject extreme favorites (same as MM)
 
 
 class MarketType(Enum):
@@ -238,6 +249,76 @@ class ArbScanner:
             f"  SMART SLIPPAGE: Depth-based ({SLIPPAGE_TIGHT:.3f} - {SLIPPAGE_LOOSE:.3f})"
             + (f"\\n  Max Budget: ${max_budget:.2f}" if max_budget is not None else "")
         )
+    
+    def _validate_leg_microstructure(self, outcome: OutcomePrice, market_id: str = "unknown") -> bool:
+        """INSTITUTIONAL UPGRADE (Phase 1): Validate individual arbitrage leg quality
+        
+        Per institutional audit - arbitrage needs per-leg microstructure validation to:
+        1. Avoid wide spread legs (>10% spread creates execution risk)
+        2. Reject extreme prices (long-shots bid <=0.02, favorites ask >=0.98)
+        3. Ensure reasonable dollar liquidity per leg (not just share count)
+        
+        This is DIFFERENT from market making's 3% spread threshold because:
+        - Arbitrage executes multi-leg baskets (cumulative slippage across legs)
+        - Arbitrage holds for seconds (vs MM holding days)
+        - Arbitrage needs looser per-leg tolerance but strict basket-level math
+        
+        Args:
+            outcome: Outcome price data with bid/ask/depth
+            market_id: Market ID for logging (optional)
+            
+        Returns:
+            bool: True if leg passes microstructure quality checks, False otherwise
+        """
+        bid = outcome.bid_price
+        ask = outcome.ask_price
+        depth = outcome.available_depth
+        
+        # CHECK 1: Extreme price detection (same threshold as market making)
+        # Reject long-shot bids (<=2 cents) - adverse selection risk
+        if bid <= MIN_ARB_LEG_BID:
+            logger.debug(
+                f"[ARB REJECT] {market_id}: LEG {outcome.outcome_name[:20]} - "
+                f"Extreme bid {bid:.4f} <= {MIN_ARB_LEG_BID:.2f} (long-shot risk)"
+            )
+            return False
+        
+        # Reject favorite asks (>=98 cents) - minimal profit potential
+        if ask >= MAX_ARB_LEG_ASK:
+            logger.debug(
+                f"[ARB REJECT] {market_id}: LEG {outcome.outcome_name[:20]} - "
+                f"Extreme ask {ask:.4f} >= {MAX_ARB_LEG_ASK:.2f} (favorite risk)"
+            )
+            return False
+        
+        # CHECK 2: Spread quality per leg (10% maximum vs MM's 3%)
+        # Arbitrage needs looser tolerance since multi-leg execution
+        if bid > 0:  # Avoid division by zero
+            mid_price = (bid + ask) / 2.0
+            spread_pct = (ask - bid) / mid_price if mid_price > 0 else 1.0
+            
+            if spread_pct > MAX_ARB_LEG_SPREAD_PERCENT:
+                logger.debug(
+                    f"[ARB REJECT] {market_id}: LEG {outcome.outcome_name[:20]} - "
+                    f"Wide spread {spread_pct:.2%} > {MAX_ARB_LEG_SPREAD_PERCENT:.0%} "
+                    f"(bid={bid:.4f}, ask={ask:.4f})"
+                )
+                return False
+        
+        # CHECK 3: Dollar liquidity per leg (not just share count)
+        # Ensure at least $2 available per leg to avoid thin book slippage
+        leg_liquidity_usd = depth * ask  # Dollar value at ask price
+        
+        if leg_liquidity_usd < MIN_ARB_LEG_LIQUIDITY_USD:
+            logger.debug(
+                f"[ARB REJECT] {market_id}: LEG {outcome.outcome_name[:20]} - "
+                f"Thin liquidity ${leg_liquidity_usd:.2f} < ${MIN_ARB_LEG_LIQUIDITY_USD:.2f} "
+                f"({depth:.1f} shares @ ${ask:.4f})"
+            )
+            return False
+        
+        # All checks passed
+        return True
     
     def _calculate_smart_slippage(self, available_depth: float) -> float:
         """Calculate dynamic slippage tolerance based on order book depth
@@ -517,6 +598,11 @@ class ArbScanner:
         - Validate sufficient depth on ALL legs before accepting opportunity
         - Calculate smart slippage based on depth per leg
         
+        INSTITUTIONAL UPGRADE (Phase 1):
+        - Validate event-level AND market-level status (active, not closed)
+        - Validate CLOB enablement for all constituent markets
+        - Reject if any market is closed/inactive/disabled
+        
         Args:
             event: Event data from /events API
             
@@ -527,6 +613,41 @@ class ArbScanner:
             event_id = event.get('id', 'unknown')
             outcomes = event.get('outcomes', [])
             token_ids = event.get('clobTokenIds', [])
+            
+            # INSTITUTIONAL CHECK 1: Event-level status validation
+            # Per audit - event can be active while constituent markets are closed
+            if event.get('closed', False):
+                logger.debug(f"[ARB REJECT] {event_id}: Event is closed")
+                return None
+            
+            if not event.get('active', True):
+                logger.debug(f"[ARB REJECT] {event_id}: Event is inactive")
+                return None
+            
+            # INSTITUTIONAL CHECK 2: Market-level status validation
+            # Validate each constituent market within the event
+            markets = event.get('markets', [])
+            if markets:  # If markets array is present, validate each
+                for market in markets:
+                    if market.get('closed', False):
+                        logger.debug(
+                            f"[ARB REJECT] {event_id}: Constituent market {market.get('id', 'unknown')} is closed"
+                        )
+                        return None
+                    
+                    if not market.get('active', True):
+                        logger.debug(
+                            f"[ARB REJECT] {event_id}: Constituent market {market.get('id', 'unknown')} is inactive"
+                        )
+                        return None
+                    
+                    # INSTITUTIONAL CHECK 3: CLOB enablement (cross-strategy consistency)
+                    # Same check as market making strategy Layer 3
+                    if market.get('enableOrderBook') is False:
+                        logger.debug(
+                            f"[ARB REJECT] {event_id}: Constituent market {market.get('id', 'unknown')} has CLOB disabled"
+                        )
+                        return None
             
             # Validation: Must have same number of outcomes and token IDs
             if len(outcomes) != len(token_ids):
@@ -789,7 +910,7 @@ class ArbScanner:
                         )
                         return None  # Skip if insufficient depth
                     
-                    outcome_prices.append(OutcomePrice(
+                    outcome_price = OutcomePrice(
                         outcome_index=idx,
                         outcome_name=outcome,
                         token_id=token_id,
@@ -797,8 +918,14 @@ class ArbScanner:
                         bid_price=best_bid,
                         ask_price=best_ask,
                         available_depth=depth_at_ask
-                    ))
+                    )
                     
+                    # INSTITUTIONAL UPGRADE (Phase 1): Validate leg microstructure quality
+                    # Reject entire opportunity if any leg fails quality checks
+                    if not self._validate_leg_microstructure(outcome_price, market_id=market_id):
+                        return None  # Entire opportunity rejected if one leg is poor quality
+                    
+                    outcome_prices.append(outcome_price)
                     sum_prices += mid_price
                     
                 except Exception as e:
@@ -948,18 +1075,27 @@ class AtomicExecutor:
     If any leg fails, abort the entire sequence and cancel pending orders.
     
     Safety: Validates slippage, balance, and order book depth before execution.
+    
+    INSTITUTIONAL UPGRADE (Phase 1): Staleness validation before execution
     """
     
-    def __init__(self, client: PolymarketClient, order_manager: OrderManager):
+    def __init__(
+        self,
+        client: PolymarketClient,
+        order_manager: OrderManager,
+        market_data_manager: Optional[Any] = None
+    ):
         """
         Initialize executor with order management
         
         Args:
             client: Polymarket CLOB client
             order_manager: Order execution manager with validation
+            market_data_manager: MarketDataManager for staleness check (optional)
         """
         self.client = client
         self.order_manager = order_manager
+        self.market_data_manager = market_data_manager  # INSTITUTIONAL: For staleness check
         self._pending_orders: Dict[str, Dict] = {}  # Track pending orders
         self._budget_used = Decimal('0')
         self._max_budget = Decimal(str(TOTAL_ARBITRAGE_BUDGET))
@@ -971,6 +1107,7 @@ class AtomicExecutor:
             f"AtomicExecutor initialized - "
             f"FOK mode, Max budget: ${TOTAL_ARBITRAGE_BUDGET}, "
             f"Smart slippage: {SLIPPAGE_TIGHT:.3f} - {SLIPPAGE_LOOSE:.3f} (depth-based)"
+            + (", Staleness check: ENABLED" if market_data_manager else ", Staleness check: DISABLED")
         )
     
     def _calculate_smart_slippage(self, available_depth: float) -> float:
@@ -1031,8 +1168,8 @@ class AtomicExecutor:
                 f"{shares_to_buy} shares @ {opportunity.required_budget:.2f} USDC"
             )
             
-            # Pre-execution validation
-            await self._validate_execution(opportunity, shares_to_buy)
+            # Pre-execution validation (INSTITUTIONAL: includes staleness check)
+            await self._validate_execution(opportunity, shares_to_buy, self.market_data_manager)
             
             # FLAW 1 FIX: Use asyncio.gather() for TRUE atomic execution
             # All orders fire at the same millisecond - no sequential "legging-in"
@@ -1275,7 +1412,8 @@ class AtomicExecutor:
     async def _validate_execution(
         self,
         opportunity: ArbitrageOpportunity,
-        shares_to_buy: float
+        shares_to_buy: float,
+        market_data_manager: Optional[Any] = None
     ) -> None:
         """
         Validate execution prerequisites
@@ -1285,14 +1423,31 @@ class AtomicExecutor:
         2. Sufficient balance in account
         3. Order book depth constraints
         4. Slippage within limits
+        5. INSTITUTIONAL (Phase 1): Data staleness check (avoid adverse fills)
         
         Args:
             opportunity: Arbitrage opportunity
             shares_to_buy: Proposed share count
+            market_data_manager: MarketDataManager for staleness check (optional)
             
         Raises:
             TradingError: If any validation fails
         """
+        # INSTITUTIONAL CHECK (Phase 1): Staleness validation before execution
+        # Per audit - prevent adverse fills on stale data (>5s old)
+        if market_data_manager:
+            for outcome in opportunity.outcomes:
+                if market_data_manager.is_market_stale(outcome.token_id):
+                    raise TradingError(
+                        f"[ARB ABORT] Stale data detected for {outcome.token_id[:8]}... "
+                        f"(>{DATA_STALENESS_THRESHOLD}s since last update). "
+                        f"Aborting to prevent adverse fill."
+                    )
+                    logger.warning(
+                        f"[STALENESS ABORT] Rejected arbitrage execution on stale data "
+                        f"for {opportunity.market_id}"
+                    )
+        
         # Check budget
         required_cost = shares_to_buy * opportunity.required_budget
         budget_remaining = self._max_budget - self._budget_used

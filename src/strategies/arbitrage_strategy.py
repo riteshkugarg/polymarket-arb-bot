@@ -134,7 +134,8 @@ class ArbitrageStrategy(BaseStrategy):
             market_data_manager=market_data_manager,
             max_budget=self._max_capital  # Pass capital to scanner
         )
-        self.executor = AtomicExecutor(client, order_manager)
+        # INSTITUTIONAL UPGRADE (Phase 1): Pass market_data_manager to executor for staleness check
+        self.executor = AtomicExecutor(client, order_manager, market_data_manager=market_data_manager)
         self.atomic_executor = atomic_executor or AtomicDepthAwareExecutor(client, order_manager)
         self.use_depth_aware_executor = atomic_executor is not None
         
