@@ -2270,36 +2270,30 @@ class MarketMakingStrategy(BaseStrategy):
                 pass
         
         # ═══════════════════════════════════════════════════════════════════════════════
-        # FILTER 9: QUALITY SCORE (Phase 3 Enhancement)
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # POLYMARKET FEEDBACK: "We do provide a score field in market responses that
-        # could serve as a quality indicator."
-        # 
-        # NOTE: Methodology not documented - needs clarification from Polymarket support
-        # Current implementation: Log score for analysis, don't filter yet
-        # TODO: After Q17 response, implement threshold-based filtering
-        
-        score = market.get('score')
-        if score is not None:
-            try:
-                score_value = float(score)
-                # Log for analysis (determine distribution and optimal threshold)
-                logger.debug(
-                    f"[SCORE ANALYSIS] {market_id}: score={score_value:.4f} | "
-                    f"Question: {question[:50]}..."
-                )
-                
-                # FUTURE: After understanding score methodology from Polymarket:
-                # if score_value < MINIMUM_QUALITY_SCORE:
-                #     logger.debug(f"[TIER-1 REJECT] {market_id}: QUALITY-SCORE - "
-                #                  f"Score {score_value:.4f} below threshold")
-                #     return False
-            except (ValueError, TypeError):
-                pass  # Invalid score format - skip filtering
-        
-        # ═══════════════════════════════════════════════════════════════════════════════
         # PASSED ALL TIER-1 FILTERS
         # ═══════════════════════════════════════════════════════════════════════════════
+        #
+        # NOTE: Score field removed per Polymarket Q17 response (Jan 2026)
+        # "The documentation doesn't contain information about a general 'score' field
+        # for market quality assessment. Without documentation on a dedicated market
+        # quality score field, you'd need to create your own quality metrics using
+        # available market data like volume, liquidity, spread, and order book depth."
+        #
+        # Current filters (8 layers) are sufficient for institutional-grade quality:
+        #   1. Blacklist filtering (zombie markets)
+        #   2. Liquidity depth (minimum $500)
+        #   3. 24h volume (minimum $1000)
+        #   4. Bid-ask spread (<5%)
+        #   5. Extreme prices (0.02-0.98 range)
+        #   6. Market data freshness (2s staleness)
+        #   7. Category specialization (institutional categories)
+        #   8. Tick size validation (0.0001-0.1)
+        #
+        # TODO (P2 Enhancement): Build composite quality metric using:
+        #   - Liquidity depth (40%): Total $ within 2% of mid
+        #   - Volume consistency (30%): 24h volume / liquidity ratio
+        #   - Spread tightness (20%): Normalized spread
+        #   - Order book depth (10%): Number of orders per side
         
         logger.info(
             f"[TIER-1 ACCEPT] ✅ {market_id}: Market passed all filters | "
