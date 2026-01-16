@@ -55,6 +55,9 @@ from config.constants import (
     # Budget allocation
     MARKET_MAKING_STRATEGY_CAPITAL,
     
+    # WebSocket data staleness threshold
+    DATA_STALENESS_THRESHOLD,
+    
     # Market selection - Adaptive Capacity Filtering
     MM_MAX_MARKETS,
     MM_VOLUME_MULTIPLIER,
@@ -2042,6 +2045,61 @@ class MarketMakingStrategy(BaseStrategy):
                 return market
         return None
     
+    async def _wait_for_cache_warmup(self, asset_ids: List[str], timeout: float = 10.0) -> bool:
+        """Wait for WebSocket cache to warm up with fresh data before quoting
+        
+        Prevents the infinite loop where strategy starts quoting before cache
+        is populated, triggering "STALE DATA" warnings and immediate position closes.
+        
+        Args:
+            asset_ids: List of asset IDs (token IDs) to wait for
+            timeout: Maximum time to wait in seconds (default: 10s)
+            
+        Returns:
+            True if all assets have fresh data, False if timeout reached
+        """
+        start_time = time.time()
+        elapsed = 0.0
+        
+        logger.info(
+            f"[CACHE WARMUP] Waiting for fresh data for {len(asset_ids)} assets "
+            f"(timeout: {timeout}s, staleness threshold: {DATA_STALENESS_THRESHOLD}s)"
+        )
+        
+        while elapsed < timeout:
+            # Check if all assets have fresh data
+            all_fresh = True
+            stale_assets = []
+            
+            for asset_id in asset_ids:
+                if not self._market_data_manager or self._market_data_manager.cache.is_stale(asset_id):
+                    all_fresh = False
+                    stale_assets.append(asset_id[:8])
+            
+            if all_fresh:
+                logger.info(
+                    f"[CACHE WARMUP] ✅ All {len(asset_ids)} assets have fresh data "
+                    f"(warmup completed in {elapsed:.1f}s)"
+                )
+                return True
+            
+            # Log progress every 2 seconds
+            if int(elapsed) % 2 == 0 and elapsed > 0:
+                logger.debug(
+                    f"[CACHE WARMUP] Waiting... {len(stale_assets)}/{len(asset_ids)} assets still stale "
+                    f"(elapsed: {elapsed:.1f}s/{timeout}s)"
+                )
+            
+            await asyncio.sleep(0.5)  # Check every 500ms
+            elapsed = time.time() - start_time
+        
+        # Timeout reached
+        logger.warning(
+            f"[CACHE WARMUP] ⚠️ Timeout after {timeout}s - {len(stale_assets)}/{len(asset_ids)} "
+            f"assets still stale: {stale_assets[:5]}"
+        )
+        return False
+    
     async def _start_market_making(self, market: Dict) -> None:
         """Start making market with global exposure check"""
         # CRITICAL: Use conditionId (required by get_market API), not id
@@ -2080,6 +2138,20 @@ class MarketMakingStrategy(BaseStrategy):
                 logger.info(f"✅ Subscribed to WebSocket updates for {market_id[:8]}...")
             except Exception as e:
                 logger.warning(f"Failed to subscribe to WebSocket for {market_id[:8]}...: {e}")
+        
+        # CRITICAL: Wait for cache warmup before placing quotes
+        # This prevents "STALE DATA" warnings during startup that trigger
+        # immediate position closes, creating an infinite loop
+        if self._market_data_manager:
+            cache_ready = await self._wait_for_cache_warmup(token_ids, timeout=10.0)
+            if not cache_ready:
+                logger.error(
+                    f"[CACHE WARMUP] Failed to get fresh data for {market_id[:8]}... "
+                    f"after 10s timeout - Aborting market making for this market"
+                )
+                # Remove position and return
+                del self._positions[market_id]
+                return
         
         await self._place_quotes(market_id)
     
@@ -2141,7 +2213,7 @@ class MarketMakingStrategy(BaseStrategy):
         Update quotes for all active positions (parallel execution)
         
         INSTITUTIONAL SAFETY: LAG CIRCUIT BREAKER
-        - Checks for stale data (>2s old) before updating quotes
+        - Checks for stale data (>{DATA_STALENESS_THRESHOLD}s old) before updating quotes
         - Cancels all quotes if any active market has stale data
         - Prevents trading on outdated prices during WebSocket outages
         """
@@ -2158,13 +2230,33 @@ class MarketMakingStrategy(BaseStrategy):
             if self._market_data_manager.check_market_staleness(active_token_ids):
                 stale_markets = self._market_data_manager.get_stale_markets()
                 logger.error(
-                    f"🚨 LAG CIRCUIT BREAKER TRIGGERED: {len(stale_markets)} markets have stale data (>2s)\\n"
+                    f"🚨 LAG CIRCUIT BREAKER TRIGGERED: {len(stale_markets)} markets have stale data (>{DATA_STALENESS_THRESHOLD}s)\\n"
                     f"   Stale assets: {list(stale_markets)[:5]}\\n"
                     f"   ACTION: Cancelling ALL quotes to prevent trading on outdated prices"
                 )
                 
                 # Cancel all quotes immediately
                 await self._cancel_all_quotes()
+                
+                # CRITICAL FIX: Check if positions have actual exposure before attempting close
+                # If data becomes stale, cancel orders but DON'T close $0 exposure positions
+                for market_id, position in list(self._positions.items()):
+                    # Calculate total exposure across all tokens
+                    total_exposure = sum(abs(inv) for inv in position.inventory.values())
+                    
+                    if total_exposure == 0:
+                        # No exposure - just clean up position tracking
+                        logger.debug(
+                            f"[LAG BREAKER] Position {market_id[:8]}... has $0 exposure - "
+                            f"keeping position open (orders cancelled)"
+                        )
+                    else:
+                        # Has exposure - log warning but don't force close yet
+                        # Let the normal risk management handle inventory unwinding
+                        logger.warning(
+                            f"[LAG BREAKER] Position {market_id[:8]}... has {total_exposure} shares exposure - "
+                            f"orders cancelled, will unwind via risk management when data is fresh"
+                        )
                 
                 # Skip quote updates this cycle - wait for fresh data
                 return

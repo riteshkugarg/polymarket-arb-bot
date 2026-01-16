@@ -348,6 +348,21 @@ ENABLE_NEGRISK_AUTO_DETECTION: Final[bool] = True
 # Heartbeat interval - how often to log balance and health metrics
 HEARTBEAT_INTERVAL_SEC: Final[int] = 300  # 5 minutes
 
+# ============================================================================
+# WEBSOCKET DATA STALENESS THRESHOLD
+# ============================================================================
+# Central threshold for detecting stale market data across all strategies
+# PRODUCTION-GRADE: 5.0s (5s heartbeat + buffer for network jitter)
+# Used by:
+#   - MarketDataManager: GlobalMarketCache staleness detection
+#   - MarketMakingStrategy: Quote update circuit breaker
+#   - Cache warmup: Wait for fresh data before quoting
+# Rationale:
+#   - Must accommodate 5s WebSocket heartbeat interval
+#   - Previous 2.0s was too aggressive (false positives during startup)
+#   - Balance: Fast enough to detect real disconnects, tolerant of normal latency
+DATA_STALENESS_THRESHOLD: Final[float] = 5.0  # seconds
+
 # Maximum allowed drawdown before emergency kill switch (PERCENTAGE-BASED)
 # INSTITUTIONAL HFT STANDARD: 5% of peak equity for small accounts
 # Rationale:

@@ -48,6 +48,7 @@ from config.constants import (
     ORDER_HEARTBEAT_INTERVAL_SEC,
     MAKER_RETRY_PRICE_STEP,
     REBATE_PRIORITY_WEIGHT,
+    DATA_STALENESS_THRESHOLD,  # WebSocket data staleness threshold
     REBATE_OPTIMAL_PRICE_MIN,
     REBATE_OPTIMAL_PRICE_MAX,
     CHECK_AND_REDEEM_INTERVAL_SEC,
@@ -372,7 +373,7 @@ class PolymarketBot:
             try:
                 self.market_data_manager = MarketDataManager(
                     client=self.client,
-                    stale_threshold=7.0,  # PRODUCTION: 7s (5s heartbeat + 2s jitter buffer)
+                    stale_threshold=DATA_STALENESS_THRESHOLD,  # Uses central 5s threshold
                     ws_url="wss://ws-subscriptions-clob.polymarket.com/ws/market"
                 )
                 await self.market_data_manager.initialize()

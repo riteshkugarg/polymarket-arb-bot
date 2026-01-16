@@ -42,6 +42,7 @@ from threading import Lock
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
+from config.constants import DATA_STALENESS_THRESHOLD
 from utils.logger import get_logger
 from utils.exceptions import NetworkError
 
@@ -68,15 +69,26 @@ class MarketSnapshot:
     bids: List[Dict[str, Any]] = field(default_factory=list)
     asks: List[Dict[str, Any]] = field(default_factory=list)
     
-    def is_stale(self, threshold_seconds: float = 7.0) -> bool:
+    # INSTITUTIONAL UPGRADE: Hash tracking & state validation
+    hash: Optional[str] = None  # Orderbook hash for state divergence detection
+    last_hash: Optional[str] = None  # Previous hash for duplicate detection
+    dirty_cache: bool = False  # True if price_change received but not full book
+    last_ws_activity: float = 0.0  # Last time ANY WebSocket message received (for inactive market detection)
+    
+    def is_stale(self, threshold_seconds: float = None) -> bool:
         """Check if data hasn't been updated in threshold seconds
         
-        PRODUCTION-GRADE: 7s threshold (5s heartbeat + 2s jitter buffer)
+        Args:
+            threshold_seconds: Override threshold (defaults to DATA_STALENESS_THRESHOLD)
+        
+        PRODUCTION-GRADE: 5s threshold (5s heartbeat + buffer for network jitter)
         - Prevents false positives from network latency
         - Aligns with 5s WebSocket heartbeat interval
         - Previous 0.5s was too aggressive (caused spurious "stale data" warnings)
-        - Institution balance: Fast enough to detect real disconnects, slow enough to avoid false alarms
+        - Institutional balance: Fast enough to detect real disconnects, slow enough to avoid false alarms
         """
+        if threshold_seconds is None:
+            threshold_seconds = DATA_STALENESS_THRESHOLD
         return (time.time() - self.last_update) > threshold_seconds
     
     def to_dict(self) -> Dict[str, Any]:
@@ -93,7 +105,27 @@ class MarketSnapshot:
             'last_update': self.last_update,
             'bids': self.bids,
             'asks': self.asks,
+            'hash': self.hash,
+            'dirty_cache': self.dirty_cache,
+            'last_ws_activity': self.last_ws_activity,
         }
+    
+    def is_inactive(self, inactive_threshold: float = 60.0) -> bool:
+        """Check if market has had no WebSocket activity (book or price_change)
+        
+        Args:
+            inactive_threshold: Seconds without WebSocket activity (default: 60s)
+        
+        Returns:
+            True if no WS messages for > threshold seconds
+        
+        INSTITUTIONAL INSIGHT: For inactive markets, you may be the only quoter.
+        Your own orders won't trigger price_change events until someone trades.
+        Proactive REST refresh prevents "phantom liquidity" quotes.
+        """
+        if self.last_ws_activity == 0.0:
+            return False  # Never received WS message yet
+        return (time.time() - self.last_ws_activity) > inactive_threshold
 
 
 @dataclass
@@ -133,10 +165,13 @@ class MarketStateCache:
     - Thread Safety: All operations protected by RLock
     """
     
-    def __init__(self, stale_threshold_seconds: float = 7.0):
+    def __init__(self, stale_threshold_seconds: float = None):
         """Initialize market state cache
         
-        PRODUCTION-GRADE STALENESS: 7s default (5s heartbeat + 2s jitter)
+        Args:
+            stale_threshold_seconds: Override threshold (defaults to DATA_STALENESS_THRESHOLD)
+        
+        PRODUCTION-GRADE STALENESS: 5s default (5s heartbeat + buffer)
         - Per production review: Must accommodate 5s WebSocket heartbeat
         - Prevents spurious "stale data" warnings from network jitter
         - Previous 0.5s caused false positives (heartbeat delay triggers circuit breaker)
@@ -144,7 +179,7 @@ class MarketStateCache:
         """
         self._cache: Dict[str, MarketSnapshot] = {}
         self._lock = Lock()
-        self._stale_threshold = stale_threshold_seconds
+        self._stale_threshold = stale_threshold_seconds if stale_threshold_seconds is not None else DATA_STALENESS_THRESHOLD
         self._stale_markets: Set[str] = set()
         
         # Market metadata cache
@@ -163,7 +198,7 @@ class MarketStateCache:
         self._market_update_handlers: Dict[str, Tuple[Callable, Optional[Set[str]]]] = {}
         
         logger.info(
-            f"MarketStateCache initialized (stale threshold: {stale_threshold_seconds}s) "
+            f"MarketStateCache initialized (stale threshold: {self._stale_threshold}s) "
             f"[HFT-Grade Timestamp Integrity ENABLED]"
         )
     
@@ -223,11 +258,25 @@ class MarketStateCache:
         }
     
     def is_stale(self, asset_id: str) -> bool:
-        """Check if asset data is stale (>2s old)"""
+        """Check if asset data is stale (>threshold old)"""
         snapshot = self.get(asset_id)
         if not snapshot:
             return True
         return snapshot.is_stale(self._stale_threshold)
+    
+    def is_cache_fresh(self, asset_id: str) -> bool:
+        """Check if asset cache has fresh data (inverse of is_stale)
+        
+        Returns True if asset exists in cache AND data is fresh.
+        Use this in cache warmup to verify data is ready before quoting.
+        
+        Args:
+            asset_id: Asset identifier
+            
+        Returns:
+            True if cache has fresh data, False if missing or stale
+        """
+        return not self.is_stale(asset_id)
     
     def get_stale_markets(self) -> Set[str]:
         """Get all currently stale markets (LAG CIRCUIT BREAKER)"""
@@ -637,52 +686,129 @@ class PolymarketWSManager:
                 
                 # Handle different event types
                 if event_type == 'price_change':
-                    # Price change events: {"market": "...", "price_changes": [...], "timestamp": ...}
-                    # Per Polymarket support: WebSocket for price updates, REST /book for full depth
-                    price_changes = data.get('price_changes', [])
-                    if not price_changes:
-                        continue
+                    # ═══════════════════════════════════════════════════════════════════
+                    # INSTITUTIONAL RULE: Price change events are INCREMENTAL updates
+                    # Per Polymarket Support (Jan 2026):
+                    #   - Contains: asset_id, price, size, side (BUY/SELL), hash, best_bid, best_ask
+                    #   - Designed for incremental updates, NOT full book replacement
+                    #   - Update best_bid/best_ask for accurate spreads
+                    #   - Mark dirty_cache=True to signal: "Full depth may be stale"
+                    # ═══════════════════════════════════════════════════════════════════
                     
-                    # Update timestamps only - keep data fresh to avoid stale warnings
-                    # Market maker will use REST /book when it needs full order book depth
-                    for change in price_changes:
-                        token_id = change.get('token_id')
-                        price = change.get('price')
-                        if token_id and price:
-                            # Check if we have existing cache data
-                            existing = self.cache.get(token_id)
-                            if existing:
-                                # Update timestamp to keep cache fresh, preserve existing bid/ask/depth
-                                existing.last_update = time.time()
-                                existing.mid_price = float(price)
-                                existing.micro_price = float(price)
-                                self.cache.update(token_id, existing, force=True)
-                            else:
-                                # No cache yet - create minimal snapshot (will trigger REST fallback)
-                                # Market making needs full depth from REST API
-                                snapshot = MarketSnapshot(
-                                    asset_id=token_id,
-                                    best_bid=float(price),
-                                    best_ask=float(price),
-                                    bid_size=0.0,  # Unknown - use REST /book
-                                    ask_size=0.0,  # Unknown - use REST /book
-                                    mid_price=float(price),
-                                    micro_price=float(price),
-                                    obi=0.0,
-                                    last_update=time.time(),
-                                    bids=[],  # Empty - needs REST /book for full depth
-                                    asks=[]   # Empty - needs REST /book for full depth
-                                )
-                                self.cache.update(token_id, snapshot, force=True)
+                    current_time = time.time()
+                    
+                    # Extract price_change fields per Polymarket support guidance
+                    asset_id_field = data.get('asset_id') or data.get('market')
+                    best_bid_new = data.get('best_bid')
+                    best_ask_new = data.get('best_ask')
+                    price = data.get('price')
+                    size = data.get('size')
+                    side = data.get('side')  # 'BUY' or 'SELL'
+                    hash_new = data.get('hash')
+                    
+                    # Fallback: Check for price_changes array (older format)
+                    price_changes = data.get('price_changes', [])
+                    
+                    if asset_id_field and (best_bid_new is not None or best_ask_new is not None):
+                        # New format: Direct best_bid/best_ask fields
+                        existing = self.cache.get(asset_id_field)
+                        
+                        if existing:
+                            # INSTITUTIONAL: Update best_bid/best_ask incrementally
+                            if best_bid_new is not None:
+                                existing.best_bid = float(best_bid_new)
+                            if best_ask_new is not None:
+                                existing.best_ask = float(best_ask_new)
+                            
+                            # Recalculate mid and micro prices
+                            existing.mid_price = (existing.best_bid + existing.best_ask) / 2.0
+                            existing.micro_price = existing.mid_price  # Simplified for price_change
+                            
+                            # Update metadata
+                            existing.last_update = current_time
+                            existing.last_ws_activity = current_time
+                            existing.dirty_cache = True  # Full depth NOT updated
+                            if hash_new:
+                                existing.hash = hash_new
+                            
+                            self.cache.update(asset_id_field, existing, force=True)
+                            
+                            logger.debug(
+                                f"[WS] price_change: {asset_id_field[:8]}... "
+                                f"bid={existing.best_bid:.4f} ask={existing.best_ask:.4f} "
+                                f"(dirty_cache=True)"
+                            )
+                        else:
+                            # No cache yet - create minimal snapshot with best_bid/ask
+                            snapshot = MarketSnapshot(
+                                asset_id=asset_id_field,
+                                best_bid=float(best_bid_new) if best_bid_new else float(price or 0.5),
+                                best_ask=float(best_ask_new) if best_ask_new else float(price or 0.5),
+                                bid_size=float(size or 0.0) if side == 'BUY' else 0.0,
+                                ask_size=float(size or 0.0) if side == 'SELL' else 0.0,
+                                mid_price=float(price or 0.5),
+                                micro_price=float(price or 0.5),
+                                obi=0.0,
+                                last_update=current_time,
+                                last_ws_activity=current_time,
+                                bids=[],  # Empty - needs REST /book for full depth
+                                asks=[],  # Empty - needs REST /book for full depth
+                                dirty_cache=True,  # Needs full book
+                                hash=hash_new
+                            )
+                            self.cache.update(asset_id_field, snapshot, force=True)
+                    
+                    elif price_changes:
+                        # Fallback: Old format with price_changes array
+                        for change in price_changes:
+                            token_id = change.get('token_id') or change.get('asset_id')
+                            price = change.get('price')
+                            if token_id and price:
+                                existing = self.cache.get(token_id)
+                                if existing:
+                                    existing.last_update = current_time
+                                    existing.last_ws_activity = current_time
+                                    existing.mid_price = float(price)
+                                    existing.micro_price = float(price)
+                                    existing.dirty_cache = True
+                                    self.cache.update(token_id, existing, force=True)
+                    
                     continue
                 
-                # Handle 'book' events - FULL ORDER BOOK SNAPSHOTS
+                # ═══════════════════════════════════════════════════════════════════
+                # Handle 'book' events - FULL ORDER BOOK SNAPSHOTS ("THICK" messages)
+                # ═══════════════════════════════════════════════════════════════════
+                # INSTITUTIONAL RULES:
+                # 1. book events contain full depth arrays (bids/asks)
+                # 2. Hash validation: Detect state divergence
+                # 3. Field normalization: buys/sells → bids/asks at ingestion layer
+                # 4. Clear dirty_cache flag after successful book update
+                # ═══════════════════════════════════════════════════════════════════
                 # Per Polymarket Support (Jan 2026): "Book events are full snapshots, not deltas"
                 # These arrive when orders are placed/cancelled (may be infrequent for inactive markets)
-                # Extract order book data
-                # Per Polymarket support: book events use 'buys' and 'sells' (not bids/asks)
-                bids = data.get('buys', data.get('bids', []))  # Try 'buys' first, fallback to 'bids'
-                asks = data.get('sells', data.get('asks', []))  # Try 'sells' first, fallback to 'asks'
+                # Structure: {"asset_id": "...", "market": "...", "buys": [...], "sells": [...], "timestamp": ..., "hash": "..."}
+                
+                if event_type == 'book':
+                    current_time = time.time()
+                    book_hash = data.get('hash')
+                    
+                    # Log book event arrival (helpful for debugging inactive markets)
+                    logger.debug(
+                        f"[WS] book event: {asset_id[:8]}... "
+                        f"(hash: {book_hash[:8] if book_hash else 'none'}...)"
+                    )
+                
+                # ═══════════════════════════════════════════════════════════════════
+                # INSTITUTIONAL FIELD NORMALIZATION (Ingestion Layer)
+                # ═══════════════════════════════════════════════════════════════════
+                # Polymarket inconsistency:
+                #   - Gamma API (REST): Returns 'bids' and 'asks'
+                #   - CLOB WebSocket: Returns 'buys' and 'sells'
+                # 
+                # Normalize at ingestion so strategy layer ONLY sees 'bids' and 'asks'
+                # ═══════════════════════════════════════════════════════════════════
+                bids = data.get('buys') or data.get('bids', [])  # Normalize: buys → bids
+                asks = data.get('sells') or data.get('asks', [])  # Normalize: sells → asks
                 
                 if not bids or not asks:
                     continue
@@ -763,7 +889,26 @@ class PolymarketWSManager:
                     )
                     self._obi_logged.add(asset_id)
                 
-                # Create snapshot
+                # ═══════════════════════════════════════════════════════════════════
+                # INSTITUTIONAL: Hash Validation & State Divergence Detection
+                # ═══════════════════════════════════════════════════════════════════
+                book_hash = data.get('hash')
+                existing = self.cache.get(asset_id)
+                
+                # Duplicate detection: If hash matches last_hash, skip update
+                if existing and book_hash and existing.last_hash == book_hash:
+                    logger.debug(
+                        f"[WS] Duplicate book message for {asset_id[:8]}... "
+                        f"(hash: {book_hash[:8]}...) - skipping"
+                    )
+                    continue
+                
+                # State divergence detection would go here if we had local hash calculation
+                # For now, trust the exchange hash and track it for duplicate detection
+                
+                current_time = time.time()
+                
+                # Create snapshot with full depth
                 snapshot = MarketSnapshot(
                     asset_id=asset_id,
                     best_bid=best_bid,
@@ -773,9 +918,13 @@ class PolymarketWSManager:
                     mid_price=mid_price,
                     micro_price=micro_price,
                     obi=obi,
-                    last_update=time.time(),
+                    last_update=current_time,
+                    last_ws_activity=current_time,  # Track WS activity for inactive market detection
                     bids=bids[:10],  # Keep top 10 levels
                     asks=asks[:10],
+                    hash=book_hash,  # Track orderbook hash
+                    last_hash=existing.hash if existing else None,  # Previous hash
+                    dirty_cache=False  # Clear dirty flag - we have full book now
                 )
                 
                 # Update cache
@@ -1107,23 +1256,96 @@ class MarketDataManager:
     def __init__(
         self,
         client: Any,
-        stale_threshold: float = 7.0,  # PRODUCTION: 7s (5s heartbeat + 2s jitter)
+        stale_threshold: float = None,  # PRODUCTION: Uses DATA_STALENESS_THRESHOLD (5s)
         ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     ):
         self.client = client
-        self.cache = GlobalMarketCache(stale_threshold_seconds=stale_threshold)
+        self.cache = GlobalMarketCache(stale_threshold_seconds=stale_threshold if stale_threshold is not None else DATA_STALENESS_THRESHOLD)
         self.ws_manager = PolymarketWSManager(client, self.cache, ws_url=ws_url)
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._inactive_threshold = 60.0  # 60s without WebSocket activity triggers REST refresh
         
         logger.info("MarketDataManager created")
     
     async def initialize(self) -> None:
         """Start WebSocket connection and background tasks"""
         await self.ws_manager.initialize()
-        logger.info("✅ MarketDataManager initialized")
+        
+        # Start inactive market heartbeat task
+        self._heartbeat_task = asyncio.create_task(self._inactive_market_heartbeat())
+        
+        logger.info("✅ MarketDataManager initialized (with inactive market heartbeat)")
     
     async def shutdown(self) -> None:
         """Graceful shutdown"""
+        # Cancel heartbeat task
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        
         await self.ws_manager.shutdown()
+    
+    async def _inactive_market_heartbeat(self) -> None:
+        """
+        INSTITUTIONAL STALE HEARTBEAT: Proactive REST refresh for inactive markets
+        
+        Logic:
+        - Check all cached markets every 30s
+        - If no WebSocket activity for 60s → REST refresh
+        - Prevents quoting stale prices in inactive markets
+        - Your own orders won't trigger price_change events until someone trades
+        """
+        logger.info(
+            f"[HEARTBEAT] Inactive market monitor started "
+            f"(check interval: 30s, inactive threshold: {self._inactive_threshold}s)"
+        )
+        
+        while True:
+            try:
+                await asyncio.sleep(30.0)  # Check every 30 seconds
+                
+                all_assets = self.cache.get_all_assets()
+                if not all_assets:
+                    continue
+                
+                inactive_count = 0
+                refreshed_count = 0
+                
+                for asset_id in all_assets:
+                    snapshot = self.cache.get(asset_id)
+                    if not snapshot:
+                        continue
+                    
+                    # Check if market is inactive (no WS messages for 60s)
+                    if snapshot.is_inactive(self._inactive_threshold):
+                        inactive_count += 1
+                        
+                        logger.info(
+                            f"[HEARTBEAT] Inactive market detected: {asset_id[:8]}... "
+                            f"(no WS activity for {time.time() - snapshot.last_ws_activity:.0f}s) "
+                            f"- Triggering REST refresh"
+                        )
+                        
+                        # Refresh from REST API
+                        success = await self.force_refresh_from_rest(asset_id)
+                        if success:
+                            refreshed_count += 1
+                
+                if inactive_count > 0:
+                    logger.info(
+                        f"[HEARTBEAT] Inactive market scan complete: "
+                        f"{inactive_count} inactive, {refreshed_count} refreshed via REST"
+                    )
+                
+            except asyncio.CancelledError:
+                logger.info("[HEARTBEAT] Inactive market monitor stopped")
+                break
+            except Exception as e:
+                logger.error(f"[HEARTBEAT] Error in inactive market monitor: {e}", exc_info=True)
+                await asyncio.sleep(5.0)  # Brief pause before retry
     
     async def subscribe_markets(self, market_ids: List[str]) -> None:
         """Subscribe to markets (auto-discovers asset IDs)"""
@@ -1198,13 +1420,26 @@ class MarketDataManager:
         """
         Check if any of the given markets are stale
         
-        Returns True if ANY market in the list is stale (>2s old).
+        Returns True if ANY market in the list is stale (>threshold old).
         Use this before executing trades to ensure data freshness.
         """
         for asset_id in asset_ids:
             if self.cache.is_stale(asset_id):
                 return True
         return False
+    
+    def is_cache_fresh(self, asset_id: str) -> bool:
+        """Check if cache has fresh data for asset
+        
+        Used by strategies to verify cache warmup before quoting.
+        
+        Args:
+            asset_id: Asset identifier
+            
+        Returns:
+            True if cache has fresh data, False if missing or stale
+        """
+        return self.cache.is_cache_fresh(asset_id)
     
     async def force_refresh_from_rest(self, asset_id: str) -> bool:
         """
