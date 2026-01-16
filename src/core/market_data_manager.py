@@ -42,9 +42,9 @@ from threading import Lock
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
-from config.constants import DATA_STALENESS_THRESHOLD
-from utils.logger import get_logger
-from utils.exceptions import NetworkError
+from src.config.constants import DATA_STALENESS_THRESHOLD
+from src.utils.logger import get_logger
+from src.utils.exceptions import NetworkError
 
 
 logger = get_logger(__name__)

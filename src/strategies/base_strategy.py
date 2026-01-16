@@ -7,10 +7,10 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import asyncio
 
-from core.polymarket_client import PolymarketClient
-from core.order_manager import OrderManager
-from utils.logger import get_logger
-from utils.exceptions import StrategyError
+from src.core.polymarket_client import PolymarketClient
+from src.core.order_manager import OrderManager
+from src.utils.logger import get_logger
+from src.utils.exceptions import StrategyError
 
 
 logger = get_logger(__name__)

@@ -28,9 +28,9 @@ import time
 from datetime import datetime
 from enum import Enum
 
-from core.polymarket_client import PolymarketClient
-from core.order_manager import OrderManager
-from config.constants import (
+from src.core.polymarket_client import PolymarketClient
+from src.core.order_manager import OrderManager
+from src.config.constants import (
     ATOMIC_MIN_DEPTH_SHARES,
     ATOMIC_TOP_PIPS_DEPTH,
     ATOMIC_ORDER_TIMEOUT_SEC,
@@ -40,8 +40,8 @@ from config.constants import (
     FOK_FILL_FAILURE_COOLDOWN_SEC,
     ENABLE_NEGRISK_AUTO_DETECTION,
 )
-from utils.logger import get_logger
-from utils.exceptions import (
+from src.utils.logger import get_logger
+from src.utils.exceptions import (
     OrderRejectionError,
     InsufficientBalanceError,
     TradingError,

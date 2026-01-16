@@ -8,9 +8,9 @@ from typing import Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
 
-from config.constants import AWS_REGION, AWS_SECRET_ID
-from utils.logger import get_logger
-from utils.exceptions import ConfigurationError
+from src.config.constants import AWS_REGION, AWS_SECRET_ID
+from src.utils.logger import get_logger
+from src.utils.exceptions import ConfigurationError
 
 
 logger = get_logger(__name__)

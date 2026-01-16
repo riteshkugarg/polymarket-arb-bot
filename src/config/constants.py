@@ -731,32 +731,32 @@ MM_PREFER_BINARY_MARKETS: Final[bool] = True
 MM_TARGET_TAGS: Final[List[str]] = [
     # ═══════════════════════════════════════════════════════════════════════════
     # FALLBACK TAGS (Used only when dynamic discovery fails)
-    # PRIMARY source is DynamicTagManager (auto-refresh every 24 hours)
-    # These tags are BACKUP ONLY - not used during normal operation
+    # PRIMARY source is DynamicTagManager (auto-refresh every 24 hours using /events)
+    # These tags are BACKUP ONLY - not used during normal operation (~1% usage)
     # ═══════════════════════════════════════════════════════════════════════════
     
-    # CAPITAL VELOCITY OPTIMIZED FALLBACK (Last validated: Jan 2026)
-    # Note: Polymarket does NOT have 15min-1hr crypto markets like traditional futures
-    # Most markets settle in 1-7 days (elections, sports events, geopolitical outcomes)
-    # Fallback strategy: Prioritize high-volume categories most likely to have <3 day markets
+    # VALIDATED SHORT-TERM MARKET TAG (Jan 16, 2026):
+    # Per empirical testing: Bitcoin tag (235) has active <1hr and <4hr markets
+    # "Bitcoin Up or Down - January 16, 4AM ET" (hourly settlements)
+    # These are the 15-minute/hourly crypto markets mentioned by Polymarket
     
-    '235',      # Bitcoin - Crypto price predictions (long-term, but high volume)
-    '78',       # Iran - Middle East geopolitics (event-driven, faster settlements)
-    '180',      # Israel - Middle East conflicts (news-driven, active markets)
-    '802',      # Iowa - US Elections/Caucuses (event-specific, known settlement dates)
-    '166',      # South Korea - Asian geopolitics (event-driven)
+    '235',      # Bitcoin - <1hr markets confirmed (Up or Down hourly markets)
+                # Current: 1 market <1hr, 3 markets <4hr, 6 markets <24hr
+                # 15-minute market verification: Check fee_rate_bps via CLOB API
     
-    # DEPRECATED EVENT-SPECIFIC TAGS (Kept for backward compatibility only):
-    # These may expire but serve as fallback until dynamic discovery updates them
-    # '100240',   # NBA Finals - Professional basketball (EXPIRES post-season)
-    # '292',      # Glenn Youngkin - US Politics (PERSON-SPECIFIC, may lose relevance)
-    # '388',      # Netanyahu - Israeli politics (PERSON-SPECIFIC, may lose relevance)
+    # ADDITIONAL HIGH-VOLUME TAGS (Secondary fallback):
+    # Included for high availability if Bitcoin tag unavailable
+    '78',       # Iran - Middle East geopolitics (event-driven)
+    '180',      # Israel - Middle East conflicts (news-driven)
     
-    # NOTE: Dynamic discovery will replace this entire list with tags that:
-    # - Have >5 active markets settling <3 days
-    # - Have >$10k daily volume
-    # - Have <3% spreads
-    # This fallback is only used during API outages (~1% of time)
+    # NOTE: Dynamic discovery (PRIMARY) will replace this list with:
+    # - Tags with >5 active markets settling <3 days
+    # - Tags with >$10k daily volume
+    # - Tags with <3% spreads
+    # - Optional: fee_rate_bps > 0 for 15-minute crypto identification
+    # 
+    # Fallback is ONLY used during API outages (exponential backoff exhausted,
+    # circuit breaker open, or cache expired + discovery unavailable)
     
     # ADDITIONAL INSTITUTIONAL TAGS (uncomment as needed):
     # '1192',     # Minnesota Vikings - NFL

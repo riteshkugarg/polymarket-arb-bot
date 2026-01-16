@@ -47,13 +47,13 @@ import json
 from collections import deque
 import statistics
 
-from strategies.base_strategy import BaseStrategy
-from core.polymarket_client import PolymarketClient
-from core.order_manager import OrderManager
-from core.market_data_manager import MarketDataManager, FillEvent, MarketSnapshot
-from core.blacklist_manager import MarketBlacklistManager
-from core.tag_manager import DynamicTagManager
-from config.constants import (
+from src.strategies.base_strategy import BaseStrategy
+from src.core.polymarket_client import PolymarketClient
+from src.core.order_manager import OrderManager
+from src.core.market_data_manager import MarketDataManager, FillEvent, MarketSnapshot
+from src.core.blacklist_manager import MarketBlacklistManager
+from src.core.tag_manager import DynamicTagManager
+from src.config.constants import (
     # Budget allocation
     MARKET_MAKING_STRATEGY_CAPITAL,
     
@@ -123,9 +123,9 @@ from config.constants import (
     MM_OBI_THRESHOLD,
     MM_MOMENTUM_PROTECTION_TIME,
 )
-from utils.logger import get_logger
-from utils.exceptions import StrategyError
-from utils.rate_limiter import TokenBucketRateLimiter, ORDER_PLACEMENT_RATE_LIMITER
+from src.utils.logger import get_logger
+from src.utils.exceptions import StrategyError
+from src.utils.rate_limiter import TokenBucketRateLimiter, ORDER_PLACEMENT_RATE_LIMITER
 
 
 logger = get_logger(__name__)
@@ -1705,47 +1705,62 @@ class MarketMakingStrategy(BaseStrategy):
             
             async with aiohttp.ClientSession() as session:
                 if active_tags:
-                    # SERVER-SIDE TAG FILTERING (Polymarket Best Practice)
-                    logger.info(f"Using server-side tag filtering with {len(active_tags)} tags (dynamic discovery)")
+                    # SERVER-SIDE TAG FILTERING (Polymarket Q35/Q39/Q40 Best Practice)
+                    # Use /events endpoint - most efficient, includes markets array
+                    logger.info(f"Using /events endpoint with {len(active_tags)} tags (dynamic discovery)")
                     
                     for tag_id in active_tags:
-                        # Build Gamma API URL with tag_id parameter
-                        url = f"{POLYMARKET_GAMMA_API_URL}/markets"
-                        params = {
-                            'tag_id': tag_id,
-                            'closed': 'false',      # Active markets only
-                            'related_tags': 'true', # Broader matching (optional)
-                            'limit': '100',         # Pagination
-                            'offset': '0'
-                        }
+                        # Build Gamma API URL with tag_id parameter (Q40: limit/offset pagination)
+                        url = f"{POLYMARKET_GAMMA_API_URL}/events"
                         
-                        try:
-                            # Fetch from Gamma API with server-side filtering
-                            async with session.get(url, params=params, timeout=10) as resp:
-                                if resp.status != 200:
-                                    logger.warning(f"Gamma API error for tag_id={tag_id}: {resp.status}")
-                                    continue
-                                
-                                response = await resp.json()
-                                
-                                # Gamma API returns list directly for tag filtering
-                                if isinstance(response, list):
-                                    tag_markets = response
-                                else:
-                                    tag_markets = response.get('data', [])
-                                
-                                if tag_markets:
-                                    all_markets.extend(tag_markets)
+                        # Paginate through events for this tag
+                        offset = 0
+                        limit = 50  # Q40: limit=50 is documented example
+                        max_pages = 5  # Safety limit per tag
+                        
+                        for page in range(max_pages):
+                            params = {
+                                'tag_id': tag_id,
+                                'active': 'true',
+                                'closed': 'false',
+                                'limit': str(limit),
+                                'offset': str(offset)
+                            }
+                            
+                            try:
+                                # Fetch from Gamma API /events endpoint
+                                async with session.get(url, params=params, timeout=10) as resp:
+                                    if resp.status != 200:
+                                        logger.warning(f"Gamma API error for tag_id={tag_id}: {resp.status}")
+                                        break
+                                    
+                                    events = await resp.json()
+                                    
+                                    if not events or len(events) == 0:
+                                        break  # No more events for this tag
+                                    
+                                    # Extract markets from events (Q39: event.markets array)
+                                    tag_markets_count = 0
+                                    for event in events:
+                                        event_markets = event.get('markets', [])
+                                        all_markets.extend(event_markets)
+                                        tag_markets_count += len(event_markets)
+                                    
                                     logger.debug(
-                                        f"[SERVER-SIDE FILTER] tag_id={tag_id}: {len(tag_markets)} markets | "
-                                        f"Sample: {tag_markets[0].get('question', '')[:50] if tag_markets else 'N/A'}..."
+                                        f"[EVENTS API] tag_id={tag_id} page={page+1}: "
+                                        f"{len(events)} events, {tag_markets_count} markets"
                                     )
-                                else:
-                                    logger.debug(f"[SERVER-SIDE FILTER] tag_id={tag_id}: 0 markets (no active markets with this tag)")
-                        
-                        except Exception as e:
-                            logger.error(f"Error fetching markets for tag_id={tag_id}: {e}")
-                            continue
+                                    
+                                    # Check if we got fewer results than limit (last page)
+                                    if len(events) < limit:
+                                        break
+                                    
+                                    offset += limit
+                                    await asyncio.sleep(0.1)  # Rate limiting
+                            
+                            except Exception as e:
+                                logger.error(f"Error fetching events for tag_id={tag_id} page={page}: {e}")
+                                break
                     
                     # Remove duplicates (markets can have multiple tags)
                     unique_markets = {}
@@ -1755,48 +1770,48 @@ class MarketMakingStrategy(BaseStrategy):
                             unique_markets[market_id] = market
                     
                     all_markets = list(unique_markets.values())
-                    logger.info(f"[SERVER-SIDE FILTERING] Total unique markets: {len(all_markets)} (deduped from {len(active_tags)} tags)")
+                    logger.info(f"[EVENTS API] Total unique markets: {len(all_markets)} (from {len(active_tags)} tags)")
                     
                 else:
                     # NO TAG FILTERING: Fetch all active markets (fallback)
-                    logger.warning("Active tags list is empty - fetching ALL active markets (not recommended)")
-                    next_cursor = None
+                    logger.warning("Active tags list is empty - fetching ALL active events (not recommended)")
+                    offset = 0
+                    limit = 50
                     max_pages = 10
                     
                     for page in range(max_pages):
-                        if next_cursor == 'END':
-                            break
-                        
-                        url = f"{POLYMARKET_GAMMA_API_URL}/markets"
+                        url = f"{POLYMARKET_GAMMA_API_URL}/events"
                         params = {
                             'active': 'true',
                             'closed': 'false',
-                            'limit': '100'
+                            'limit': str(limit),
+                            'offset': str(offset)
                         }
-                        if next_cursor:
-                            params['next_cursor'] = next_cursor
                         
                         async with session.get(url, params=params, timeout=10) as resp:
                             if resp.status != 200:
                                 logger.error(f"Gamma API error: {resp.status}")
                                 break
                             
-                            response = await resp.json()
+                            events = await resp.json()
                             
-                            if isinstance(response, list):
-                                page_markets = response
-                                next_cursor = 'END'
-                            else:
-                                page_markets = response.get('data', [])
-                                next_cursor = response.get('next_cursor', 'END')
-                            
-                            if not page_markets:
+                            if not events or len(events) == 0:
                                 break
                             
-                            all_markets.extend(page_markets)
-                            logger.debug(f"Fetched page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
+                            # Extract markets from events
+                            for event in events:
+                                event_markets = event.get('markets', [])
+                                all_markets.extend(event_markets)
+                            
+                            logger.debug(f"Fetched page {page+1}: {len(events)} events, {len(all_markets)} total markets")
+                            
+                            # Check if last page
+                            if len(events) < limit:
+                                break
+                            
+                            offset += limit
             
-            logger.debug(f"Total markets fetched from Gamma API: {len(all_markets)}")
+            logger.debug(f"Total markets fetched from Gamma API /events: {len(all_markets)}")
             
             # PRE-EMPTIVE BLACKLIST FILTERING (before order book analysis)
             self.blacklist_manager.reset_stats()

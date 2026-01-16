@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 import aiohttp
 from dataclasses import dataclass
 
-from config.constants import (
+from src.config.constants import (
     POLYMARKET_GAMMA_API_URL,
     MM_TARGET_TAGS,
     DYNAMIC_TAG_REFRESH_HOURS,
@@ -279,7 +279,10 @@ class DynamicTagManager:
         tag: Dict
     ) -> Optional[TagMetrics]:
         """
-        Analyze a single tag: fetch markets, calculate metrics, compute score.
+        Analyze a single tag: fetch events/markets, calculate metrics, compute score.
+        
+        POLYMARKET BEST PRACTICE (Q35/Q39 - Jan 2026):
+        Use /events endpoint for discovery - most efficient, includes markets array
         
         Returns:
             TagMetrics if successful, None otherwise
@@ -291,20 +294,29 @@ class DynamicTagManager:
             return None
         
         try:
-            # Fetch active markets for this tag
-            url = f"{POLYMARKET_GAMMA_API_URL}/markets"
+            # Fetch active events for this tag (POLYMARKET Q35: use /events for discovery)
+            url = f"{POLYMARKET_GAMMA_API_URL}/events"
             params = {
                 'tag_id': tag_id,
+                'active': 'true',
                 'closed': 'false',
-                'related_tags': 'true',
-                'limit': '100'
+                'limit': '50'  # Q40: limit=50 is documented example
             }
             
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 if response.status != 200:
                     return None
                 
-                markets = await response.json()
+                events = await response.json()
+                
+                if not events:
+                    return None
+                
+                # Extract all markets from events (Q39: event.markets array)
+                markets = []
+                for event in events:
+                    event_markets = event.get('markets', [])
+                    markets.extend(event_markets)
                 
                 if not markets or len(markets) < DYNAMIC_TAG_MIN_MARKETS:
                     return None
