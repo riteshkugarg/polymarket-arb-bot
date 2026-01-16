@@ -1,12 +1,22 @@
-# Polymarket API Structure Clarification (Q27-Q29)
+# Polymarket API Structure - RESOLVED ✅
 
 **Date**: January 16, 2026  
-**Context**: Critical clarification needed on tag/category API structure for server-side filtering implementation  
-**Priority**: P0 (BLOCKING production deployment)
+**Status**: RESOLVED - Implementation path confirmed  
+**Resolution**: Use `tag_id` parameter for server-side filtering (Q27/Q29 approach validated)
 
 ---
 
-## Background
+## Executive Summary
+
+**RESOLVED**: After receiving clarification from Polymarket support (Q22 follow-up, Q27-Q29) and conducting empirical API testing, we have confirmed the correct implementation approach:
+
+✅ **Use `tag_id` parameter** for server-side filtering (numeric IDs from `/tags` endpoint)  
+❌ **DO NOT use `category` parameter** - it's broken (ignores filter value)  
+📊 **Markets DON'T have `tags` field** - filtering happens server-side, no client-side validation needed
+
+---
+
+## Original Investigation
 
 Your Q22 response recommended using "server-side filtering with `tag_id` parameter in `/markets` endpoint" instead of client-side category filtering. However, our investigation revealed discrepancies between the recommendation and actual API behavior.
 
@@ -42,7 +52,153 @@ Returns 0 markets (tag filtering appears to not work with numeric IDs)
 
 ---
 
-## Q27: Tag System Structure & Category Relationship
+## Polymarket Support Responses (Received Jan 16, 2026)
+
+### Q22 Follow-Up Response
+**Summary**: Contradictory guidance - recommends client-side filtering
+
+> "The /tags endpoint returning all 'Unknown' names suggests the tag system may not be properly populated or accessible."
+>
+> "For your institutional filtering, use the category field (singular string) from market responses for client-side filtering. The tag_id server-side filtering appears unreliable given your findings."
+>
+> **Recommended**: `filtered_markets = [m for m in markets if m.get("category") in target_categories]`
+
+### Q27 Response
+**Summary**: Use tag_id with numeric IDs
+
+> "Use numeric tag IDs from /tags endpoint with the tag_id parameter. The documentation shows examples like /events?tag_id=100381&limit=1&closed=false using numeric IDs, not strings."
+>
+> "Tags vs Categories: These are separate systems. Markets have both categories arrays (hierarchical classification) and tags arrays (filtering labels)."
+>
+> "Server-Side Filtering: Use: GET /markets?tag_id=103165 (numeric ID from /tags endpoint)"
+
+### Q28 Response  
+**Summary**: Tags should exist in market objects
+
+> "Tags aren't stored in the single category string you're seeing. In the APIs that expose them, tags live under a tags field."
+>
+> "Gamma /markets: tags is an array of objects (id, label, slug, etc.), and you may also see categories as an array."
+
+### Q29 Response
+**Summary**: Use tag_id for server-side filtering
+
+> "For efficient server-side filtering on the Gamma /markets endpoint, use tag-based filtering with the tag_id query param (not category)."
+>
+> "Valid /markets filtering params: tag_id (integer), related_tags (boolean), and exclude_tag_id"
+>
+> **Working Example**:
+> 1. Discover tag ID: `GET https://gamma-api.polymarket.com/tags`
+> 2. Filter markets: `GET https://gamma-api.polymarket.com/markets?tag_id=100381&closed=false&limit=25`
+
+---
+
+## Empirical API Testing Results ✅
+
+We conducted comprehensive testing to resolve the contradictions between Q22 (client-side) and Q27/Q29 (server-side) recommendations.
+
+### Test 1: Market Object Structure
+
+```bash
+GET /markets?limit=10&closed=false
+```
+
+**Results**:
+- ❌ Markets DO NOT have `tags` field (contradicts Q28 response)
+- ❌ Markets DO NOT have `categories` array (contradicts Q27/Q28 responses)
+- ❌ Markets DO NOT have singular `category` field either
+- ✅ Markets have 100+ fields but no classification metadata
+
+**Implication**: Q28's claim that "tags live under a tags field" is incorrect for current Gamma API.
+
+### Test 2: tag_id Parameter Filtering ✅
+
+```bash
+GET /markets?tag_id=235&closed=false&limit=5  # Bitcoin tag
+```
+
+**Results**:
+| Tag ID | Tag Name | Markets Returned | Works? |
+|--------|----------|------------------|--------|
+| 235 | Bitcoin | 5 markets | ✅ YES |
+| 100240 | NBA Finals | 5 markets | ✅ YES |
+| 78 | Iran | 5 markets | ✅ YES |
+| 180 | Israel | 5 markets | ✅ YES |
+| 1060 | iowa caucus | 0 markets | ✅ YES (no active markets) |
+
+**Sample Response**:
+```
+- "Will Bitcoin hit $80k or $150k first?"
+- "Will the Oklahoma City Thunder win the 2026 NBA Finals?"
+- "Khamenei out as Supreme Leader of Iran by June 30?"
+- "Netanyahu out by end of 2026?"
+```
+
+**✅ CONFIRMED**: `tag_id` parameter works perfectly with numeric IDs from `/tags` endpoint.
+
+### Test 3: category Parameter Filtering ❌
+
+```bash
+GET /markets?category=crypto&closed=false&limit=3
+GET /markets?category=politics&closed=false&limit=3
+GET /markets?category=sports&closed=false&limit=3
+GET /markets?category=nonexistent-xyz&closed=false&limit=3
+```
+
+**Results**:
+```
+crypto:     [517310, 517311, 517313]  # Trump deportation markets
+politics:   [517310, 517311, 517313]  # IDENTICAL
+sports:     [517310, 517311, 517313]  # IDENTICAL
+nonexistent:[517310, 517311, 517313]  # IDENTICAL (even fake category!)
+```
+
+**❌ BUG CONFIRMED**: `category` parameter is completely ignored by the API. All queries return identical markets regardless of category value (even nonexistent categories return results).
+
+**Returned markets have `category: None`** - further evidence the parameter doesn't work.
+
+---
+
+## Final Verdict 🏆
+
+**RESOLVED IMPLEMENTATION**:
+
+✅ **Use Q27/Q29 Approach**: Server-side filtering with `tag_id` parameter  
+✅ **Use numeric tag IDs** from `/tags?limit=100` endpoint  
+✅ **Ignore Q22 guidance** - tag_id filtering is NOT unreliable, it works perfectly  
+❌ **DO NOT use `category` parameter** - it's broken (accepts any value, returns same results)  
+❌ **Markets don't have `tags` field** - don't try to validate client-side
+
+**Working Implementation**:
+```python
+# 1. Discover tags once (cache results)
+tags = requests.get('https://gamma-api.polymarket.com/tags?limit=100').json()
+# Returns: [{"id": "235", "label": "Bitcoin", "slug": "bitcoin"}, ...]
+
+# 2. Filter markets server-side by tag_id
+TARGET_TAG_IDS = ['235', '100240', '78', '180']  # Bitcoin, NBA, Iran, Israel
+
+for tag_id in TARGET_TAG_IDS:
+    markets = requests.get(
+        'https://gamma-api.polymarket.com/markets',
+        params={
+            'tag_id': tag_id,
+            'closed': 'false',
+            'limit': 100
+        }
+    ).json()
+    # Returns only markets matching this specific tag!
+```
+
+**Performance Impact**:
+- ✅ Reduced API calls: 4 targeted queries vs 1 massive fetch + client-side filtering
+- ✅ Reduced bandwidth: Only relevant markets returned
+- ✅ Reduced compute: No client-side filtering logic needed
+
+---
+
+## Original Questions (Now Resolved)
+
+The following questions were prepared before our empirical testing resolved the issues:
 
 **Context**: Your Q22 response stated "Tags are used for filtering while categories provide hierarchical classification" and recommended using `/tags?limit=100` to discover available tags. However, the API returns only numeric IDs with "Unknown" names.
 
