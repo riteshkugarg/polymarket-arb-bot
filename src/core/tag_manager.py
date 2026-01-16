@@ -337,13 +337,14 @@ class DynamicTagManager:
         
         try:
             # Query with time filters per Polymarket support guidance
+            # Format: ISO8601 with Z suffix (e.g., 2026-01-16T11:30:00Z)
             url = f"{POLYMARKET_GAMMA_API_URL}/events"
             params = {
                 'tag_id': SCALPING_PRIMARY_TAG,
                 'active': 'true',
                 'closed': 'false',
-                'end_date_min': now.isoformat(),
-                'end_date_max': end_date_max.isoformat(),
+                'end_date_min': now.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'end_date_max': end_date_max.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'limit': '100'
             }
             
