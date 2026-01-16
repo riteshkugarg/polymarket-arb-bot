@@ -76,7 +76,7 @@ def print_tag_mapping(tags: List[Dict[str, Any]]) -> None:
     
     for tag in tags:
         tag_id = tag.get('id', 'unknown')
-        tag_name = tag.get('name', 'Unknown')
+        tag_name = tag.get('label', tag.get('slug', 'Unknown'))  # API uses 'label', not 'name'
         tag_desc = tag.get('description', '')[:47] + '...' if len(tag.get('description', '')) > 50 else tag.get('description', '')
         print(f"{tag_id:<30} {tag_name:<30} {tag_desc:<50}")
 
@@ -94,7 +94,7 @@ def generate_constants_config(tags: List[Dict[str, Any]]) -> None:
     # Show all tags (user can comment out unwanted ones)
     for tag in tags[:15]:  # Show first 15 tags
         tag_id = tag.get('id', 'unknown')
-        tag_name = tag.get('name', 'Unknown')
+        tag_name = tag.get('label', tag.get('slug', 'Unknown'))  # API uses 'label', not 'name'
         print(f"    '{tag_id}',  # {tag_name}")
     
     if len(tags) > 15:
@@ -126,12 +126,12 @@ def suggest_high_priority_tags(tags: List[Dict[str, Any]]) -> None:
     matched = False
     for tag in tags:
         tag_id = tag.get('id', '').lower()
-        tag_name = tag.get('name', '').lower()
+        tag_name = tag.get('label', tag.get('slug', '')).lower()  # API uses 'label', not 'name'
         tag_desc = tag.get('description', '').lower()
         
         if any(keyword in tag_id or keyword in tag_name or keyword in tag_desc 
                for keyword in priority_keywords):
-            print(f"{tag.get('id'):<30} {tag.get('name'):<30}")
+            print(f"{tag.get('id'):<30} {tag.get('label', tag.get('slug', 'Unknown')):<30}")
             matched = True
     
     if not matched:
