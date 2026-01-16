@@ -11,6 +11,7 @@ WorkingDirectory=/home/ubuntu/polymarket-arb-bot
 Environment="PYTHONUNBUFFERED=1"
 Environment="AWS_REGION=eu-west-1"
 Environment="PYTHONPATH=/home/ubuntu/polymarket-arb-bot/src"
+Environment="SCALPING_MODE=true"
 ExecStart=/home/ubuntu/polymarket-arb-bot/venv/bin/python3 /home/ubuntu/polymarket-arb-bot/src/main.py
 Restart=always
 RestartSec=10
