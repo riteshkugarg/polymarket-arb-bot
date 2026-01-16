@@ -302,6 +302,11 @@ class MakerFirstExecutor:
             fee_rate_bps = await self.client.get_fee_rate_bps(token_id)
             
             # Detect NegRisk
+            # PHASE 3 AUDIT: Auto-detection verified ✅
+            # Detection logic: Query Gamma API → Parse clobTokenIds → Count outcomes
+            # Binary markets: 2 outcomes (YES/NO) → neg_risk=False
+            # NegRisk markets: 3+ outcomes → neg_risk=True
+            # Flag passed to OrderArgs options: PartialCreateOrderOptions(neg_risk=is_negrisk)
             is_negrisk = False
             if condition_id and ENABLE_NEGRISK_AUTO_DETECTION:
                 is_negrisk = await self._detect_negrisk(condition_id)

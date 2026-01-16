@@ -2253,6 +2253,34 @@ class MarketMakingStrategy(BaseStrategy):
                 pass
         
         # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 9: QUALITY SCORE (Phase 3 Enhancement)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # POLYMARKET FEEDBACK: "We do provide a score field in market responses that
+        # could serve as a quality indicator."
+        # 
+        # NOTE: Methodology not documented - needs clarification from Polymarket support
+        # Current implementation: Log score for analysis, don't filter yet
+        # TODO: After Q17 response, implement threshold-based filtering
+        
+        score = market.get('score')
+        if score is not None:
+            try:
+                score_value = float(score)
+                # Log for analysis (determine distribution and optimal threshold)
+                logger.debug(
+                    f"[SCORE ANALYSIS] {market_id}: score={score_value:.4f} | "
+                    f"Question: {question[:50]}..."
+                )
+                
+                # FUTURE: After understanding score methodology from Polymarket:
+                # if score_value < MINIMUM_QUALITY_SCORE:
+                #     logger.debug(f"[TIER-1 REJECT] {market_id}: QUALITY-SCORE - "
+                #                  f"Score {score_value:.4f} below threshold")
+                #     return False
+            except (ValueError, TypeError):
+                pass  # Invalid score format - skip filtering
+        
+        # ═══════════════════════════════════════════════════════════════════════════════
         # PASSED ALL TIER-1 FILTERS
         # ═══════════════════════════════════════════════════════════════════════════════
         

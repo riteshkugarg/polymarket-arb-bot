@@ -760,16 +760,25 @@ class ArbitrageStrategy(BaseStrategy):
             
             logger.debug(
                 f"Atomic execution: Market {opportunity.market_id[:8]}..., "
-                f"Shares: {shares_to_buy}, Outcomes: {len(outcomes)}"
+                f"Shares: {shares_to_buy}, Outcomes: {len(outcomes)}, "
+                f"NegRisk: {opportunity.is_negrisk}"
             )
             
-            # Execute atomically with depth awareness
+            # CRITICAL: Pass is_negrisk flag to executor
+            # PHASE 3 AUDIT: NegRisk flag propagation verified ✅
+            # Flow: ArbitrageScanner detects negRisk in event metadata
+            #    → ArbitrageOpportunity.is_negrisk field populated
+            #    → Passed to atomic_executor.execute_atomic_basket(is_negrisk=...)
+            #    → Maker orders include neg_risk=True in PartialCreateOrderOptions
+            #    → Order signature includes NegRisk flag (prevents "invalid signature" errors)
+            # Per Polymarket: Missing negRisk=true causes "invalid signature" errors
             result = await self.atomic_executor.execute_atomic_basket(
                 market_id=opportunity.market_id,
                 outcomes=outcomes,
                 side="BUY",
                 size=shares_to_buy,
-                order_type="FOK"  # Fill-or-Kill for safety
+                order_type="FOK",  # Fill-or-Kill for safety
+                is_negrisk=opportunity.is_negrisk  # PHASE 3: NegRisk flag propagation
             )
             
             # Convert atomic executor result to format compatible with existing code
