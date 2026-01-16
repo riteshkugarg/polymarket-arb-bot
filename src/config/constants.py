@@ -108,24 +108,25 @@ MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.98
 # - Traditional: $100 locked for 3 days = $100 capital velocity
 # - Scalping: $100 rotated 8x/day = $800 capital velocity
 #
-# Use Case: Small balance ($72) with 429 rate limits on broad discovery
-# Strategy: Focus on fast-settling, lower-volume markets for rapid turnover
+# Use Case: Small balance ($72) targeting short-term liquid markets
+# Strategy: Focus on <24hr markets with time-based filtering + fee-rate checks
+# Based on Polymarket support guidance (Jan 2026):
+#   - 15-min crypto markets exist with maker rebates (20% as of Jan 12-18)
+#   - Use end_date_min/max for time-based discovery
+#   - Check fee-rate endpoint to identify rebate opportunities
+#   - Prioritize orderbook depth over volume for position sizing
 # ============================================================================
 
 IS_SCALPING_MODE: Final[bool] = os.getenv('SCALPING_MODE', 'false').lower() == 'true'
 
-# Scalping Mode Whitelist: High-priority tag IDs for fast-settling markets
-# These tags are checked FIRST before general discovery
-# VERIFIED TAG IDs (from scripts/discover_tags.py - Jan 16, 2026):
-# Tag 235: Bitcoin (crypto price predictions, may include hourly markets)
-# Tag 100240: NBA Finals (NBA basketball, includes rapid-settling props)
-# Tag 891: Mixed Martial Arts (UFC/MMA, includes round-by-round markets)
-# NOTE: Run scripts/discover_15min_markets.py to verify which tags have <1hr markets
-SCALPING_PRIORITY_TAGS: Final[List[str]] = [
-    '235',     # Bitcoin - Crypto price predictions (check for hourly markets)
-    '100240',  # NBA Finals - Basketball (quarters, halftime, rapid props)
-    '891',     # Mixed Martial Arts - UFC/MMA (round outcomes, fast settlement)
-]
+# Scalping Mode: Crypto Tag for Time-Based Discovery
+# Tag 235 (Bitcoin) is the primary source for 15-minute fee-enabled markets
+# Discovery flow per Polymarket support:
+#   1. GET /events?tag_id=235&active=true&closed=false&end_date_min=NOW&end_date_max=NOW+24h
+#   2. For each market's clobTokenIds, GET /fee-rate?token_id={id}
+#   3. If fee_rate_bps > 0, it's a 15-min market with maker rebates
+# Additional tags discovered dynamically from markets meeting criteria
+SCALPING_PRIMARY_TAG: Final[str] = '235'  # Bitcoin - Primary source for 15-min crypto markets
 
 # Note: Set environment variable SCALPING_MODE=true to enable
 # Or manually set IS_SCALPING_MODE = True in this file
@@ -835,19 +836,19 @@ MM_TARGET_TAGS: Final[List[str]] = [
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Minimum time until settlement (hours) - avoid same-minute settlements
-# SCALPING MODE: 6 minutes (0.1 hours) - capture ultra-short markets
+# SCALPING MODE: 15 minutes (0.25 hours) - realistic short-term markets
 # BROAD MODE: 15 minutes (0.25 hours) - institutional standard
-# Rationale: Scalping focuses on NBA quarters, tennis sets, hourly crypto
-MM_MIN_HOURS_UNTIL_SETTLEMENT: Final[float] = 0.1 if IS_SCALPING_MODE else 0.25
+# Rationale: Based on Polymarket support feedback - 15-min crypto markets are the shortest available
+MM_MIN_HOURS_UNTIL_SETTLEMENT: Final[float] = 0.25
 
 # Maximum time until settlement (days) - avoid long-term capital lock-up
-# SCALPING MODE: 1 hour (0.04 days) - ultra-fast capital rotation
+# SCALPING MODE: 1 day (1.0 days) - fast capital rotation with realistic market availability
 # BROAD MODE: 3 days - institutional standard
 # Rationale:
-#   - Scalping: Capital rotated 8-24x/day (NBA quarters, tennis sets, hourly crypto)
+#   - Scalping: Targets <24hr markets based on Polymarket support guidance
 #   - Broad: 3 days allows sports/political events while maintaining velocity
 #   - Prevents capital lock-up in distant markets (30+ days)
-MM_MAX_DAYS_UNTIL_SETTLEMENT: Final[float] = 0.04 if IS_SCALPING_MODE else 3.0
+MM_MAX_DAYS_UNTIL_SETTLEMENT: Final[float] = 1.0 if IS_SCALPING_MODE else 3.0
 
 # Preferred maximum time (hours) - prioritize ultra-short markets
 # INSTITUTIONAL STANDARD: 24 hours preferred
@@ -866,10 +867,10 @@ MM_SETTLEMENT_TIME_WEIGHT: Final[float] = 2.0
 # INSTITUTIONAL STANDARD: Auto-refresh every 24 hours
 DYNAMIC_TAG_REFRESH_HOURS: Final[int] = 24  # Refresh tags daily
 DYNAMIC_TAG_DISCOVERY_LIMIT: Final[int] = 10  # Top 10 tags by volume
-# SCALPING MODE: Aggressive thresholds for small-balance, high-frequency trading
+# SCALPING MODE: Realistic thresholds based on Polymarket support guidance
 # BROAD MODE: Conservative institutional thresholds
 DYNAMIC_TAG_MIN_MARKETS: Final[int] = 1 if IS_SCALPING_MODE else 5  # Scalping: 1 market, Broad: 5 markets
-DYNAMIC_TAG_MIN_VOLUME: Final[float] = 500.0 if IS_SCALPING_MODE else 10000.0  # Scalping: $500, Broad: $10k
+DYNAMIC_TAG_MIN_VOLUME: Final[float] = 1000.0 if IS_SCALPING_MODE else 10000.0  # Scalping: $1k (baseline), Broad: $10k
 DYNAMIC_TAG_MAX_SPREAD: Final[float] = 0.05 if IS_SCALPING_MODE else 0.03  # Scalping: 5%, Broad: 3%
 
 # Maximum number of markets to make simultaneously

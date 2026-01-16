@@ -45,7 +45,8 @@ from config.constants import (
     MM_MAX_DAYS_UNTIL_SETTLEMENT,
     MM_SETTLEMENT_TIME_WEIGHT,
     IS_SCALPING_MODE,
-    SCALPING_PRIORITY_TAGS,
+    SCALPING_PRIMARY_TAG,
+    CLOB_API_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,8 +102,8 @@ class DynamicTagManager:
         if IS_SCALPING_MODE:
             logger.info(
                 f"🎯 Scalping Mode Active: "
-                f"Priority tags: {SCALPING_PRIORITY_TAGS}, "
-                f"Settlement: {MM_MIN_HOURS_UNTIL_SETTLEMENT:.2f}h - {MM_MAX_DAYS_UNTIL_SETTLEMENT:.3f} days"
+                f"Primary tag: {SCALPING_PRIMARY_TAG} (Bitcoin - 15-min crypto markets), "
+                f"Settlement: {MM_MIN_HOURS_UNTIL_SETTLEMENT:.2f}h - {MM_MAX_DAYS_UNTIL_SETTLEMENT:.1f} days"
             )
     
     async def get_active_tags(self) -> List[str]:
@@ -237,10 +238,14 @@ class DynamicTagManager:
     
     async def _discover_high_volume_tags(self) -> List[TagMetrics]:
         """
-        Core discovery algorithm: Fetch tags, analyze markets, score and rank.
+        Core discovery algorithm with time-based filtering (Polymarket best practice).
         
-        SCALPING MODE: Priority whitelist tags checked first
-        BROAD MODE: Standard discovery across all tags
+        SCALPING MODE: Time-based discovery on Bitcoin tag (15-min crypto markets)
+        - Query: /events?tag_id=235&active=true&closed=false&end_date_min=NOW&end_date_max=NOW+24h
+        - Check fee-rate endpoint to identify maker rebate opportunities
+        - Build adaptive tag list from successful markets
+        
+        BROAD MODE: Standard tag-based discovery
         
         Returns:
             List of TagMetrics sorted by score (descending)
@@ -248,43 +253,25 @@ class DynamicTagManager:
         start_time = datetime.utcnow()
         
         async with aiohttp.ClientSession() as session:
-            # SCALPING MODE: Check priority tags first (avoid rate limits)
-            if IS_SCALPING_MODE and SCALPING_PRIORITY_TAGS:
+            # SCALPING MODE: Time-based discovery on Bitcoin tag
+            if IS_SCALPING_MODE:
                 logger.info(
-                    f"🎯 SCALPING MODE: Checking {len(SCALPING_PRIORITY_TAGS)} priority tags first: "
-                    f"{SCALPING_PRIORITY_TAGS}"
+                    f"🎯 SCALPING MODE: Time-based discovery on tag {SCALPING_PRIMARY_TAG} (Bitcoin)"
                 )
                 
-                # Build tag objects for priority tags
-                priority_tag_objs = [{'id': tag_id, 'label': f'Priority-{tag_id}'} for tag_id in SCALPING_PRIORITY_TAGS]
+                # Use time-based filtering per Polymarket support guidance
+                scalping_metrics = await self._discover_time_filtered_markets(session)
                 
-                # Analyze priority tags with rate limit jitter
-                import random
-                priority_tasks = []
-                for i, tag in enumerate(priority_tag_objs):
-                    # Add jitter to avoid simultaneous API calls (429 prevention)
-                    jitter = random.uniform(0.1, 0.3) * i
-                    await asyncio.sleep(jitter)
-                    priority_tasks.append(self._analyze_tag(session, tag))
-                
-                priority_metrics = await asyncio.gather(*priority_tasks, return_exceptions=True)
-                
-                # Filter valid priority tags
-                valid_priority = [
-                    m for m in priority_metrics
-                    if isinstance(m, TagMetrics) and self._passes_filters(m)
-                ]
-                
-                if valid_priority:
+                if scalping_metrics:
                     logger.info(
-                        f"✅ Priority tags found: {len(valid_priority)} markets. "
-                        f"Skipping broad discovery to save API quota."
+                        f"✅ Time-based discovery found {len(scalping_metrics)} qualifying tags. "
+                        f"Skipping broad discovery."
                     )
-                    valid_priority.sort(key=lambda m: m.score, reverse=True)
-                    return valid_priority
+                    scalping_metrics.sort(key=lambda m: m.score, reverse=True)
+                    return scalping_metrics
                 else:
                     logger.warning(
-                        f"⚠️ No valid priority tags found. Falling back to broad discovery."
+                        f"⚠️ No markets found in time window. Falling back to broad discovery."
                     )
             
             # BROAD DISCOVERY (or scalping fallback)
@@ -323,6 +310,232 @@ class DynamicTagManager:
             )
             
             return valid_metrics
+    
+    async def _discover_time_filtered_markets(
+        self,
+        session: aiohttp.ClientSession
+    ) -> List[TagMetrics]:
+        """
+        Time-based market discovery (Polymarket support best practice).
+        
+        Per support guidance (Jan 2026):
+        - Query: /events?tag_id=235&active=true&closed=false&end_date_min=NOW&end_date_max=NOW+24h
+        - Check fee-rate endpoint for 15-min markets: GET /fee-rate?token_id={id}
+        - Build adaptive tag list from markets that meet criteria
+        
+        Returns:
+            List of TagMetrics for tags with markets in the time window
+        """
+        now = datetime.utcnow()
+        max_hours = MM_MAX_DAYS_UNTIL_SETTLEMENT * 24
+        end_date_max = now + timedelta(hours=max_hours)
+        
+        logger.info(
+            f"Time-based discovery: tag={SCALPING_PRIMARY_TAG}, "
+            f"window={MM_MIN_HOURS_UNTIL_SETTLEMENT:.1f}h - {max_hours:.0f}h"
+        )
+        
+        try:
+            # Query with time filters per Polymarket support guidance
+            url = f"{POLYMARKET_GAMMA_API_URL}/events"
+            params = {
+                'tag_id': SCALPING_PRIMARY_TAG,
+                'active': 'true',
+                'closed': 'false',
+                'end_date_min': now.isoformat(),
+                'end_date_max': end_date_max.isoformat(),
+                'limit': '100'
+            }
+            
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                if response.status != 200:
+                    logger.error(f"Time-filtered query failed: HTTP {response.status}")
+                    return []
+                
+                events = await response.json()
+                
+                if not events:
+                    logger.warning(f"No events found in time window for tag {SCALPING_PRIMARY_TAG}")
+                    return []
+                
+                logger.info(f"Found {len(events)} events in time window")
+                
+                # Extract markets and check for fee-enabled (15-min rebate opportunities)
+                tag_markets_map = {}  # tag_id -> list of markets
+                fee_enabled_count = 0
+                
+                for event in events:
+                    markets = event.get('markets', [])
+                    event_tags = event.get('tags', [])
+                    
+                    for market in markets:
+                        # Check if market is fee-enabled (15-min crypto with maker rebates)
+                        clob_token_ids = market.get('clobTokenIds', [])
+                        is_fee_enabled = False
+                        
+                        if clob_token_ids:
+                            # Check first token ID (representative)
+                            token_id = clob_token_ids[0]
+                            fee_rate = await self._check_fee_rate(session, token_id)
+                            if fee_rate and fee_rate > 0:
+                                is_fee_enabled = True
+                                fee_enabled_count += 1
+                                logger.info(
+                                    f"🎯 Fee-enabled market found: {market.get('question', 'Unknown')} "
+                                    f"(fee_rate={fee_rate} bps, token={token_id})"
+                                )
+                        
+                        # Add market to each associated tag
+                        for tag_obj in event_tags:
+                            tag_id = str(tag_obj.get('id', ''))
+                            if tag_id:
+                                if tag_id not in tag_markets_map:
+                                    tag_markets_map[tag_id] = {
+                                        'label': tag_obj.get('label', f'Tag-{tag_id}'),
+                                        'markets': [],
+                                        'fee_enabled_markets': 0
+                                    }
+                                tag_markets_map[tag_id]['markets'].append(market)
+                                if is_fee_enabled:
+                                    tag_markets_map[tag_id]['fee_enabled_markets'] += 1
+                
+                logger.info(
+                    f"Time-filtered discovery: {len(tag_markets_map)} unique tags, "
+                    f"{fee_enabled_count} fee-enabled markets (maker rebates available)"
+                )
+                
+                # Convert to TagMetrics
+                metrics_list = []
+                for tag_id, tag_data in tag_markets_map.items():
+                    metrics = self._compute_tag_metrics(
+                        tag_id,
+                        tag_data['label'],
+                        tag_data['markets'],
+                        tag_data['fee_enabled_markets']
+                    )
+                    if metrics and self._passes_filters(metrics):
+                        metrics_list.append(metrics)
+                
+                return metrics_list
+                
+        except Exception as e:
+            logger.error(f"Error in time-based discovery: {e}", exc_info=True)
+            return []
+    
+    async def _check_fee_rate(
+        self,
+        session: aiohttp.ClientSession,
+        token_id: str
+    ) -> Optional[int]:
+        """
+        Check if market is fee-enabled (15-min crypto with maker rebates).
+        
+        Per Polymarket support:
+        - GET https://clob.polymarket.com/fee-rate?token_id={id}
+        - fee_rate_bps > 0 means fee-enabled (15-min crypto market)
+        - fee_rate_bps = 0 means fee-free (standard market)
+        
+        Returns:
+            fee_rate_bps if successful, None otherwise
+        """
+        try:
+            url = f"{CLOB_API_URL}/fee-rate"
+            params = {'token_id': token_id}
+            
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                if response.status != 200:
+                    return None
+                
+                data = await response.json()
+                fee_rate_bps = data.get('fee_rate_bps', 0)
+                return fee_rate_bps
+                
+        except Exception as e:
+            logger.debug(f"Error checking fee rate for token {token_id}: {e}")
+            return None
+    
+    def _compute_tag_metrics(
+        self,
+        tag_id: str,
+        tag_label: str,
+        markets: List[Dict],
+        fee_enabled_count: int = 0
+    ) -> Optional[TagMetrics]:
+        """
+        Compute metrics for a tag from its markets.
+        
+        Args:
+            tag_id: Tag ID
+            tag_label: Tag label/name
+            markets: List of market objects
+            fee_enabled_count: Number of fee-enabled markets (maker rebate opportunities)
+        
+        Returns:
+            TagMetrics if valid, None otherwise
+        """
+        if not markets:
+            return None
+        
+        # Calculate metrics
+        total_volume = 0.0
+        spreads = []
+        hours_until_settlement = []
+        now = datetime.utcnow()
+        
+        for market in markets:
+            # Volume
+            volume_24h = market.get('volume24hr', 0.0) or 0.0
+            total_volume += volume_24h
+            
+            # Spread
+            best_bid = market.get('bestBid', 0.0) or 0.0
+            best_ask = market.get('bestAsk', 1.0) or 1.0
+            spread = best_ask - best_bid
+            if 0 <= spread <= 1:
+                spreads.append(spread)
+            
+            # Time until settlement
+            end_date_iso = market.get('endDateIso')
+            if end_date_iso:
+                try:
+                    end_date = datetime.fromisoformat(end_date_iso.replace('Z', '+00:00'))
+                    hours = (end_date - now).total_seconds() / 3600
+                    if hours > 0:
+                        hours_until_settlement.append(hours)
+                except:
+                    pass
+        
+        # Compute averages
+        market_count = len(markets)
+        avg_volume_24h = total_volume / market_count if market_count > 0 else 0.0
+        avg_spread = sum(spreads) / len(spreads) if spreads else 1.0
+        avg_hours = sum(hours_until_settlement) / len(hours_until_settlement) if hours_until_settlement else 24.0
+        
+        # SCALPING MODE SCORING: Prioritize time + fee-enabled markets
+        # Formula: score = (volume / max(avg_hours, 0.25)) * (1 + fee_enabled_boost)
+        # Rationale: 
+        #   - Fast settlement is primary
+        #   - Fee-enabled markets get 2x boost (maker rebates)
+        #   - Incentivizes targeting 15-min crypto markets
+        #
+        # BROAD MODE SCORING: Traditional volume-weighted
+        if IS_SCALPING_MODE:
+            base_score = total_volume / max(avg_hours, 0.25)
+            fee_boost = 1.0 + (fee_enabled_count / max(market_count, 1))  # Up to 2x if all fee-enabled
+            score = base_score * fee_boost
+        else:
+            time_factor = 1 + (MM_SETTLEMENT_TIME_WEIGHT / max(avg_hours, 0.1))
+            score = total_volume * time_factor
+        
+        return TagMetrics(
+            tag_id=tag_id,
+            tag_label=tag_label,
+            market_count=market_count,
+            total_volume_24h=total_volume,
+            avg_spread=avg_spread,
+            avg_hours_until_settlement=avg_hours,
+            score=score
+        )
     
     async def _fetch_all_tags(self, session: aiohttp.ClientSession) -> List[Dict]:
         """Fetch all tags from /tags endpoint with pagination"""
