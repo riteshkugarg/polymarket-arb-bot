@@ -43,6 +43,17 @@ def discover_category_ids(api_url: str = "https://gamma-api.polymarket.com") -> 
         
         print(f"✅ Fetched {len(markets)} markets")
         
+        # DEBUG: Print first market structure to understand API response
+        if markets:
+            print("\n🔍 DEBUG: First market structure sample:")
+            first_market = markets[0]
+            print(f"  Keys available: {list(first_market.keys())[:20]}")  # First 20 keys
+            if 'categories' in first_market:
+                print(f"  Categories field: {first_market['categories']}")
+            else:
+                print(f"  ⚠️  No 'categories' field found!")
+                print(f"  Sample market: {json.dumps(first_market, indent=2)[:500]}...")
+        
         # Extract all unique categories
         category_map: Dict[str, Dict[str, Any]] = {}
         market_count_by_category = defaultdict(int)
