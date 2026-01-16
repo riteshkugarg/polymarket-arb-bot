@@ -40,9 +40,17 @@ def discover_tags(api_url: str = "https://gamma-api.polymarket.com") -> List[Dic
         response.raise_for_status()
         tags = response.json()
         
+        # DEBUG: Print actual response structure
+        print(f"\n🔍 DEBUG: Raw API response structure:")
+        if isinstance(tags, list) and tags:
+            print(f"  Response type: list with {len(tags)} items")
+            print(f"  First tag structure: {json.dumps(tags[0], indent=2)}")
+        else:
+            print(f"  Response type: {type(tags)}")
+            print(f"  Full response: {json.dumps(tags, indent=2)[:1000]}...")
+        
         if not isinstance(tags, list):
             print(f"⚠️  Expected list of tags, got {type(tags)}")
-            print(f"Response: {json.dumps(tags, indent=2)[:500]}...")
             return []
         
         print(f"✅ Fetched {len(tags)} tags")
@@ -141,38 +149,68 @@ def export_to_json(tags: List[Dict[str, Any]], filename: str = "polymarket_tags.
 
 
 def test_tag_filtering(tags: List[Dict[str, Any]], api_url: str = "https://gamma-api.polymarket.com") -> None:
-    """Test server-side tag filtering with first tag"""
+    """Test server-side tag filtering with first tag AND check market tag structure"""
+    print("\n" + "="*80)
+    print("TESTING SERVER-SIDE TAG FILTERING + MARKET TAG STRUCTURE")
+    print("="*80)
+    
+    # First, fetch some markets WITHOUT tag filtering to see their structure
+    print(f"\n🔍 Fetching sample markets to examine tag structure...")
+    try:
+        response = requests.get(f"{api_url}/markets", params={'limit': 5}, timeout=30)
+        response.raise_for_status()
+        markets = response.json()
+        
+        if markets:
+            print(f"✅ Fetched {len(markets)} sample markets")
+            sample = markets[0]
+            print(f"\n📊 Sample market structure:")
+            print(f"  Keys: {list(sample.keys())[:20]}")
+            
+            # Check for tag-related fields
+            if 'tags' in sample:
+                print(f"  ✅ Found 'tags' field: {sample.get('tags')}")
+            if 'tag' in sample:
+                print(f"  ✅ Found 'tag' field: {sample.get('tag')}")
+            if 'tagId' in sample:
+                print(f"  ✅ Found 'tagId' field: {sample.get('tagId')}")
+            if 'tag_id' in sample:
+                print(f"  ✅ Found 'tag_id' field: {sample.get('tag_id')}")
+            
+            # Check category field (singular string we discovered earlier)
+            if 'category' in sample:
+                print(f"  ℹ️  Category field: '{sample.get('category')}'")
+            
+            print(f"\n💡 INSIGHT: Market tags structure revealed above")
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error fetching markets: {e}")
+    
     if not tags:
         return
     
-    print("\n" + "="*80)
-    print("TESTING SERVER-SIDE TAG FILTERING")
-    print("="*80)
-    
-    test_tag = tags[0].get('id')
-    print(f"\n🧪 Testing with tag_id='{test_tag}'...")
+    # Now test with first numeric tag
+    test_tag = tags[0].get('id') if isinstance(tags[0], dict) else str(tags[0])
+    print(f"\n🧪 Testing server-side filtering with tag_id='{test_tag}'...")
     
     try:
-        # Test server-side filtering
         response = requests.get(
             f"{api_url}/markets",
             params={'tag_id': test_tag, 'limit': 5},
             timeout=30
         )
         response.raise_for_status()
-        markets = response.json()
+        filtered_markets = response.json()
         
-        print(f"✅ Server returned {len(markets)} markets with tag '{test_tag}'")
+        print(f"✅ Server returned {len(filtered_markets)} markets with tag '{test_tag}'")
         
-        if markets:
+        if filtered_markets:
             print(f"\nSample market from tag filtering:")
-            sample = markets[0]
+            sample = filtered_markets[0]
             print(f"  ID: {sample.get('id')}")
             print(f"  Question: {sample.get('question', 'N/A')[:70]}...")
             print(f"  Category: {sample.get('category', 'N/A')}")
             
-        print(f"\n✅ Server-side filtering works! Use tag_id parameter for efficient filtering.")
-        
     except requests.exceptions.RequestException as e:
         print(f"❌ Error testing tag filtering: {e}")
 
