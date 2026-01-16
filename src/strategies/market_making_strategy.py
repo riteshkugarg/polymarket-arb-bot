@@ -1949,103 +1949,277 @@ class MarketMakingStrategy(BaseStrategy):
         return (True, 'passed')
     
     def _is_market_eligible(self, market: Dict[str, Any]) -> bool:
-        """Check if market meets criteria for market making
+        """SELECTIVE TIER-1 INSTITUTIONAL FILTER - High-signal, high-liquidity markets only
         
-        INSTITUTIONAL FILTERING (Jan 2026 - Polymarket Support Validated):
-        - Official Gamma API fields: volumeNum, volume24hr, liquidityNum, active, closed
-        - Fallback to liquidity-only if volume=null (Polymarket data issue)
-        - Check CLOB active (enableOrderBook not false)
-        - Validate tick size and order constraints if available
-        - TRADING OPTIMIZATION: Category-based filtering for high-volume markets
+        Implements 6-layer institutional-grade filtering to avoid gapped books and adverse selection:
+        1. Time-Horizon Filter (capital velocity - reject long-dated markets)
+        2. Dynamic Liquidity Threshold ($15k primary, $5k fallback for small accounts)
+        3. Microstructure Quality (spread checks, extreme price rejection)
+        4. Volume-to-Liquidity Ratio (organic trading flow validation)
+        5. Category Specialization (prioritize proven categories)
+        6. Risk-Adjusted Sizing (tick size validation)
+        
+        Args:
+            market: Market data dictionary from Gamma API
+            
+        Returns:
+            bool: True if market passes all Tier-1 filters, False otherwise
         """
-        # CATEGORY FILTERING (TRADING OPTIMIZATION)
-        # Target high-volume categories (Crypto, Sports, Politics, Pop Culture)
-        # Skip if MM_TARGET_CATEGORIES is empty (disabled)
-        if MM_TARGET_CATEGORIES:
-            market_tags = market.get('tags', [])
-            market_events = market.get('events', [])
-            
-            # Combine tags and event names for matching
-            searchable_text = ' '.join([
-                ' '.join(market_tags) if market_tags else '',
-                ' '.join([e.get('title', '') for e in market_events]) if market_events else '',
-                market.get('question', ''),
-                market.get('description', ''),
-            ]).lower()
-            
-            # Check if any target category appears in market metadata
-            category_match = any(
-                category.lower() in searchable_text 
-                for category in MM_TARGET_CATEGORIES
-            )
-            
-            if not category_match:
+        import json
+        import re
+        from datetime import datetime
+        
+        market_id = market.get('id', 'unknown')
+        question = market.get('question', '')
+        description = market.get('description', '')
+        
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 1: TIME-HORIZON (Capital Velocity)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Reject markets settling beyond 12 months to maintain capital velocity
+        # Long-dated markets lock up capital and have poor liquidity
+        
+        searchable_text = f"{question} {description}".lower()
+        
+        # Check for explicit long-dated years (2027, 2028, 2029, 2030+)
+        long_dated_years = ['2027', '2028', '2029', '2030', '2031', '2032']
+        for year in long_dated_years:
+            if year in searchable_text:
+                logger.debug(
+                    f"[TIER-1 REJECT] {market_id}: TIME-HORIZON - "
+                    f"Market references {year} (>12 months out) | Question: {question[:50]}..."
+                )
                 return False
         
-        # Binary market check (Gamma API - Per Polymarket Support Jan 2026)
-        # CRITICAL: Fields are JSON-encoded strings, NOT native arrays
-        import json
-        outcome_count = None
+        # Check for explicit date references beyond 2026
+        if re.search(r'\b(20[2-9][7-9]|203[0-9])\b', searchable_text):
+            logger.debug(
+                f"[TIER-1 REJECT] {market_id}: TIME-HORIZON - "
+                f"Market references future year >2026 | Question: {question[:50]}..."
+            )
+            return False
         
-        # Try parsing outcomes or outcomePrices (safest per Polymarket support)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 2: BINARY MARKET CHECK
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Only trade binary (2-outcome) markets for simplicity and better microstructure
+        
+        outcome_count = None
         for field in ['outcomes', 'outcomePrices', 'clobTokenIds']:
             field_value = market.get(field)
             if field_value:
                 try:
-                    if isinstance(field_value, str):
-                        parsed = json.loads(field_value)
-                    else:
-                        parsed = field_value
+                    parsed = json.loads(field_value) if isinstance(field_value, str) else field_value
                     outcome_count = len(parsed)
                     break
                 except (json.JSONDecodeError, TypeError):
                     continue
         
-        if outcome_count is None or (MM_PREFER_BINARY_MARKETS and outcome_count != 2):
+        if outcome_count is None or outcome_count != 2:
+            logger.debug(
+                f"[TIER-1 REJECT] {market_id}: BINARY - "
+                f"Market has {outcome_count} outcomes (need exactly 2) | Question: {question[:50]}..."
+            )
             return False
         
-        # MICROSTRUCTURE: CLOB status
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 3: ACTIVE STATUS & CLOB ENABLEMENT
+        # ═══════════════════════════════════════════════════════════════════════════════
+        
+        if market.get('closed', False):
+            logger.debug(f"[TIER-1 REJECT] {market_id}: STATUS - Market is closed")
+            return False
+        
+        if not market.get('active', True):
+            logger.debug(f"[TIER-1 REJECT] {market_id}: STATUS - Market is inactive")
+            return False
+        
         if market.get('enableOrderBook') is False:
+            logger.debug(f"[TIER-1 REJECT] {market_id}: CLOB - Order book disabled")
             return False
         
-        # MICROSTRUCTURE: Constraints
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 4: DYNAMIC LIQUIDITY THRESHOLD (Tier-1 Standard)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Primary: $15,000 liquidity minimum (institutional-grade)
+        # Fallback: $5,000 for small accounts (<$100) in Crypto/Politics only
+        
+        liquidity_num = market.get('liquidityNum', 0)
+        current_balance = self._max_capital if self._max_capital else 100.0
+        
+        # Determine threshold based on account size
+        if current_balance < 100:
+            # Small account: Allow $5k fallback for high-quality categories
+            required_liquidity = 5000.0
+            fallback_categories = ['crypto', 'bitcoin', 'ethereum', 'politics', 'election']
+            
+            category_match = any(cat in searchable_text for cat in fallback_categories)
+            if not category_match:
+                required_liquidity = 15000.0  # Standard threshold if not in fallback categories
+        else:
+            # Normal/large account: Always require $15k
+            required_liquidity = 15000.0
+        
+        if liquidity_num < required_liquidity:
+            logger.debug(
+                f"[TIER-1 REJECT] {market_id}: LIQUIDITY - "
+                f"${liquidity_num:.0f} < ${required_liquidity:.0f} required | "
+                f"Question: {question[:50]}..."
+            )
+            return False
+        
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 5: MICROSTRUCTURE QUALITY (The "Gapped" Check)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Reject markets with extreme spreads or prices to avoid adverse selection
+        
+        best_bid = market.get('bestBid')
+        best_ask = market.get('bestAsk')
+        
+        if best_bid is not None and best_ask is not None:
+            try:
+                bid = float(best_bid)
+                ask = float(best_ask)
+                
+                # Check for extreme long-shot prices (avoid tail risk)
+                if bid <= 0.02:
+                    logger.debug(
+                        f"[TIER-1 REJECT] {market_id}: MICROSTRUCTURE - "
+                        f"Best bid too low: {bid:.4f} <= 0.02 (extreme tail risk) | "
+                        f"Question: {question[:50]}..."
+                    )
+                    return False
+                
+                if ask >= 0.98:
+                    logger.debug(
+                        f"[TIER-1 REJECT] {market_id}: MICROSTRUCTURE - "
+                        f"Best ask too high: {ask:.4f} >= 0.98 (extreme tail risk) | "
+                        f"Question: {question[:50]}..."
+                    )
+                    return False
+                
+                # Calculate spread percentage
+                if bid > 0:  # Avoid division by zero
+                    spread = ask - bid
+                    spread_pct = spread / ((bid + ask) / 2.0)  # Spread relative to mid-price
+                    
+                    if spread_pct > 0.03:  # 3% maximum spread
+                        logger.debug(
+                            f"[TIER-1 REJECT] {market_id}: MICROSTRUCTURE - "
+                            f"Spread too wide: {spread_pct:.2%} > 3.00% "
+                            f"(bid={bid:.4f}, ask={ask:.4f}) | "
+                            f"Question: {question[:50]}..."
+                        )
+                        return False
+            except (ValueError, TypeError) as e:
+                logger.debug(
+                    f"[TIER-1 REJECT] {market_id}: MICROSTRUCTURE - "
+                    f"Invalid bid/ask data: {e}"
+                )
+                return False
+        
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 6: VOLUME-TO-LIQUIDITY RATIO (Organic Flow Validation)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Ensure organic trading flow: volume24hr >= liquidity * 0.25 (25% turnover)
+        
+        volume_24h_raw = market.get('volume24hr') or market.get('volumeNum')
+        
+        if volume_24h_raw is not None:
+            try:
+                volume_24h = float(volume_24h_raw)
+                min_volume = liquidity_num * 0.25
+                
+                if volume_24h < min_volume:
+                    logger.debug(
+                        f"[TIER-1 REJECT] {market_id}: VOLUME-FLOW - "
+                        f"24h volume ${volume_24h:.0f} < ${min_volume:.0f} (25% of liquidity) | "
+                        f"Low organic trading flow | Question: {question[:50]}..."
+                    )
+                    return False
+            except (ValueError, TypeError):
+                # If volume data is invalid, reject (can't validate organic flow)
+                logger.debug(
+                    f"[TIER-1 REJECT] {market_id}: VOLUME-FLOW - "
+                    f"Invalid volume data"
+                )
+                return False
+        else:
+            # No volume data: Reject (can't validate organic flow)
+            logger.debug(
+                f"[TIER-1 REJECT] {market_id}: VOLUME-FLOW - "
+                f"No 24h volume data available"
+            )
+            return False
+        
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 7: CATEGORY SPECIALIZATION (High-Signal Categories)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Prioritize proven high-volume categories with tight spreads
+        
+        priority_keywords = [
+            'crypto', 'bitcoin', 'ethereum', 'btc', 'eth',  # Crypto
+            'politics', 'election', 'president', 'trump', 'biden',  # Politics
+            'nfl', 'nba', 'super bowl', 'playoffs',  # Sports
+        ]
+        
+        category_match = any(keyword in searchable_text for keyword in priority_keywords)
+        
+        if MM_TARGET_CATEGORIES and not category_match:
+            # If we have target categories configured, reject non-matching markets
+            logger.debug(
+                f"[TIER-1 REJECT] {market_id}: CATEGORY - "
+                f"Market doesn't match priority keywords | Question: {question[:50]}..."
+            )
+            return False
+        
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 8: RISK-ADJUSTED SIZING (Tick Size Validation)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Large tick sizes create slippage risk - validate constraints
+        
         order_price_min_tick = market.get('orderPriceMinTickSize')
         order_min_size = market.get('orderMinSize')
         
-        if order_price_min_tick is not None and order_price_min_tick > 0.1:
-            return False
-        if order_min_size is not None and order_min_size > 10.0:
-            return False
+        if order_price_min_tick is not None:
+            try:
+                tick_size = float(order_price_min_tick)
+                if tick_size > 0.01:  # 1 cent maximum tick
+                    logger.debug(
+                        f"[TIER-1 REJECT] {market_id}: TICK-SIZE - "
+                        f"Tick size {tick_size:.4f} > 0.01 (creates slippage risk) | "
+                        f"Question: {question[:50]}..."
+                    )
+                    return False
+            except (ValueError, TypeError):
+                pass
         
-        # Active check
-        if market.get('closed', False) or not market.get('active', True):
-            return False
+        if order_min_size is not None:
+            try:
+                min_size = float(order_min_size)
+                if min_size > 10.0:  # $10 maximum minimum order
+                    logger.debug(
+                        f"[TIER-1 REJECT] {market_id}: MIN-ORDER - "
+                        f"Min order size ${min_size:.2f} > $10.00 (too large for small account) | "
+                        f"Question: {question[:50]}..."
+                    )
+                    return False
+            except (ValueError, TypeError):
+                pass
         
-        # VOLUME: Official Gamma fields (volumeNum preferred)
-        volume_num = market.get('volumeNum')
-        volume_24h_raw = market.get('volume24hr')
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # PASSED ALL TIER-1 FILTERS
+        # ═══════════════════════════════════════════════════════════════════════════════
         
-        # Handle null volume: Use liquidity-only filtering
-        if volume_num is not None:
-            volume_24h = Decimal(str(volume_num))
-        elif volume_24h_raw is not None:
-            volume_24h = Decimal(str(volume_24h_raw))
-        else:
-            # Null volume: Accept if high liquidity (10x minimum)
-            liquidity_num = market.get('liquidityNum', 0)
-            return liquidity_num >= (MM_MIN_LIQUIDITY_DEPTH * 10)
-        
-        # Check volume threshold
-        dynamic_min_volume = self._calculate_dynamic_min_volume()
-        if volume_24h < dynamic_min_volume:
-            return False
-        
-        # Liquidity check
-        liquidity_num = market.get('liquidityNum', 0)
-        if liquidity_num < MM_MIN_LIQUIDITY_DEPTH:
-            return False
+        logger.info(
+            f"[TIER-1 ACCEPT] ✅ {market_id}: Market passed all filters | "
+            f"Liquidity: ${liquidity_num:.0f}, 24h Volume: ${volume_24h:.0f}, "
+            f"Spread: {spread_pct:.2%} | Question: {question[:60]}..."
+        )
         
         return True
+    
+
     
     async def _manage_positions(self) -> None:
         """Manage active positions"""
