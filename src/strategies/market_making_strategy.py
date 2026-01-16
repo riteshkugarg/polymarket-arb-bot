@@ -2091,6 +2091,8 @@ class MarketMakingStrategy(BaseStrategy):
                 ask = float(best_ask)
                 
                 # Check for extreme long-shot prices (avoid tail risk)
+                # POLYMARKET FEEDBACK: Arbitrage widened to 0.05-0.95, but MM keeps 0.02-0.98
+                # Rationale: Market making is capital-intensive, needs conservative thresholds
                 if bid <= 0.02:
                     logger.debug(
                         f"[TIER-1 REJECT] {market_id}: MICROSTRUCTURE - "
@@ -2164,15 +2166,43 @@ class MarketMakingStrategy(BaseStrategy):
         # ═══════════════════════════════════════════════════════════════════════════════
         # FILTER 7: CATEGORY SPECIALIZATION (High-Signal Categories)
         # ═══════════════════════════════════════════════════════════════════════════════
-        # Prioritize proven high-volume categories with tight spreads
+        # POLYMARKET FEEDBACK (Phase 2): Use structured categories array
+        # "Use the categories array for primary classification. This gives you precise
+        # category matching with standardized identifiers instead of unreliable text-based
+        # pattern matching."
         
-        priority_keywords = [
-            'crypto', 'bitcoin', 'ethereum', 'btc', 'eth',  # Crypto
-            'politics', 'election', 'president', 'trump', 'biden',  # Politics
-            'nfl', 'nba', 'super bowl', 'playoffs',  # Sports
+        # Check if market has structured category data
+        categories = market.get('categories', [])
+        
+        # Priority category slugs (institutional-grade high-volume markets)
+        priority_category_slugs = [
+            'crypto', 'cryptocurrency', 'bitcoin', 'ethereum',  # Crypto
+            'politics', 'elections', 'us-politics',  # Politics
+            'sports', 'nfl', 'nba', 'soccer',  # Sports
         ]
         
-        category_match = any(keyword in searchable_text for keyword in priority_keywords)
+        category_match = False
+        
+        if categories and isinstance(categories, list):
+            # Use structured category slugs (Polymarket recommendation)
+            for cat in categories:
+                if isinstance(cat, dict):
+                    cat_slug = cat.get('slug', '').lower()
+                    cat_label = cat.get('label', '').lower()
+                    if any(priority_slug in cat_slug or priority_slug in cat_label 
+                           for priority_slug in priority_category_slugs):
+                        category_match = True
+                        break
+        
+        if not category_match:
+            # Fallback: Check text-based keywords if no structured categories
+            # (for markets without category metadata)
+            priority_keywords = [
+                'crypto', 'bitcoin', 'ethereum', 'btc', 'eth',
+                'politics', 'election', 'president', 'trump', 'biden',
+                'nfl', 'nba', 'super bowl', 'playoffs',
+            ]
+            category_match = any(keyword in searchable_text for keyword in priority_keywords)
         
         if MM_TARGET_CATEGORIES and not category_match:
             # If we have target categories configured, reject non-matching markets
@@ -2186,6 +2216,10 @@ class MarketMakingStrategy(BaseStrategy):
         # FILTER 8: RISK-ADJUSTED SIZING (Tick Size Validation)
         # ═══════════════════════════════════════════════════════════════════════════════
         # Large tick sizes create slippage risk - validate constraints
+        # POLYMARKET FEEDBACK (Phase 2): Widen tick size acceptance
+        # "Markets can have tick sizes of '0.1', '0.01', '0.001', or '0.0001'.
+        # The usual tick size is 0.01 or 0.001. Consider widening your tick size filter
+        # to accept 0.1 tick sizes, as these appear to be legitimate market configurations."
         
         order_price_min_tick = market.get('orderPriceMinTickSize')
         order_min_size = market.get('orderMinSize')
@@ -2193,10 +2227,12 @@ class MarketMakingStrategy(BaseStrategy):
         if order_price_min_tick is not None:
             try:
                 tick_size = float(order_price_min_tick)
-                if tick_size > 0.01:  # 1 cent maximum tick
+                # Accept standard tick sizes: 0.1, 0.01, 0.001, 0.0001
+                # Reject only if tick > 0.1 (10 cents - too wide for MM)
+                if tick_size > 0.1:
                     logger.debug(
                         f"[TIER-1 REJECT] {market_id}: TICK-SIZE - "
-                        f"Tick size {tick_size:.4f} > 0.01 (creates slippage risk) | "
+                        f"Tick size {tick_size:.4f} > 0.1 (creates excessive slippage) | "
                         f"Question: {question[:50]}..."
                     )
                     return False

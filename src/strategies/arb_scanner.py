@@ -113,8 +113,14 @@ MINIMUM_PROFIT_THRESHOLD = 0.001  # Don't execute if profit < $0.001
 # Per institutional audit - arbitrage needs per-leg quality validation
 MIN_ARB_LEG_LIQUIDITY_USD = 2.0  # Minimum $2 dollar liquidity per leg
 MAX_ARB_LEG_SPREAD_PERCENT = 0.10  # Maximum 10% spread per leg (looser than MM's 3%)
-MIN_ARB_LEG_BID = 0.02  # Reject extreme long-shot bids (same as MM)
-MAX_ARB_LEG_ASK = 0.98  # Reject extreme favorites (same as MM)
+
+# POLYMARKET FEEDBACK (Phase 2): Extreme price thresholds
+# "Your 0.02-0.98 threshold might be too restrictive. Consider widening to 0.05-0.95
+# since our liquidity system treats the 0.10-0.90 range differently."
+# Rationale: Liquidity rewards require double-sided liquidity at [0, 0.10) and (0.90, 1.0]
+# Trades at $0.01 and $0.99 have 0% effective fees - legitimate pricing
+MIN_ARB_LEG_BID = 0.05  # Reject extreme long-shot bids (widened from 0.02)
+MAX_ARB_LEG_ASK = 0.95  # Reject extreme favorites (widened from 0.98)
 
 
 class MarketType(Enum):
@@ -256,7 +262,7 @@ class ArbScanner:
         
         Per institutional audit - arbitrage needs per-leg microstructure validation to:
         1. Avoid wide spread legs (>10% spread creates execution risk)
-        2. Reject extreme prices (long-shots bid <=0.02, favorites ask >=0.98)
+        2. Reject extreme prices (long-shots bid <=0.05, favorites ask >=0.95) [Phase 2: Widened]
         3. Ensure reasonable dollar liquidity per leg (not just share count)
         
         This is DIFFERENT from market making's 3% spread threshold because:
@@ -275,8 +281,9 @@ class ArbScanner:
         ask = outcome.ask_price
         depth = outcome.available_depth
         
-        # CHECK 1: Extreme price detection (same threshold as market making)
-        # Reject long-shot bids (<=2 cents) - adverse selection risk
+        # CHECK 1: Extreme price detection
+        # POLYMARKET FEEDBACK: Widened from 0.02-0.98 to 0.05-0.95
+        # Reject long-shot bids (<=5 cents) - adverse selection risk
         if bid <= MIN_ARB_LEG_BID:
             logger.debug(
                 f"[ARB REJECT] {market_id}: LEG {outcome.outcome_name[:20]} - "
@@ -284,7 +291,7 @@ class ArbScanner:
             )
             return False
         
-        # Reject favorite asks (>=98 cents) - minimal profit potential
+        # Reject favorite asks (>=95 cents) - minimal profit potential
         if ask >= MAX_ARB_LEG_ASK:
             logger.debug(
                 f"[ARB REJECT] {market_id}: LEG {outcome.outcome_name[:20]} - "
