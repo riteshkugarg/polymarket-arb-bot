@@ -12,7 +12,7 @@ Key Principles:
 - Type hints for IDE support and runtime safety
 """
 
-from typing import Final, Dict
+from typing import Final, Dict, List
 import os
 
 
@@ -671,6 +671,24 @@ MM_MAX_SPREAD_PERCENT: Final[float] = 0.03  # 3% max spread (TRADING OPTIMIZATIO
 
 # Prefer binary markets (2 outcomes) for simplicity
 MM_PREFER_BINARY_MARKETS: Final[bool] = True
+
+# Target Categories for Market Making (TRADING OPTIMIZATION)
+# Focus on high-volume, tight-spread categories with daily trading activity
+# INSTITUTIONAL STANDARD: Target event-driven markets with natural liquidity
+MM_TARGET_CATEGORIES: Final[List[str]] = [
+    "Politics",          # Election outcomes, approval ratings, policy predictions
+    "Crypto",           # BTC/ETH price predictions, DeFi events
+    "Sports",           # NFL, NBA, MLB, Soccer outcomes
+    "Pop Culture",      # Entertainment, Oscars, Grammys, box office
+    "Business",         # Corporate earnings, M&A, stock prices
+    "Economics",        # CPI, Fed rates, GDP, unemployment
+]
+# Note: Leave empty list [] to disable category filtering (trade all markets)
+# Rationale:
+#   - These categories have highest daily volume and tightest spreads
+#   - Avoid long-tail categories (e.g., "2028 Presidential Nominations")
+#   - Markets tagged with these categories typically have <3% spreads
+#   - Real traders actively participate (not just speculators)
 
 # Maximum number of markets to make simultaneously
 # DEPRECATED: Use MM_MAX_MARKETS for capital allocation limit (5 markets)

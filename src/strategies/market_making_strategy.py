@@ -67,6 +67,7 @@ from config.constants import (
     MM_MAX_SPREAD_PERCENT,
     MM_PREFER_BINARY_MARKETS,
     MM_MAX_ACTIVE_MARKETS,  # Deprecated, use MM_MAX_MARKETS
+    MM_TARGET_CATEGORIES,  # TRADING OPTIMIZATION: Category filtering
     
     # Position sizing
     MM_BASE_POSITION_SIZE,
@@ -1955,7 +1956,32 @@ class MarketMakingStrategy(BaseStrategy):
         - Fallback to liquidity-only if volume=null (Polymarket data issue)
         - Check CLOB active (enableOrderBook not false)
         - Validate tick size and order constraints if available
+        - TRADING OPTIMIZATION: Category-based filtering for high-volume markets
         """
+        # CATEGORY FILTERING (TRADING OPTIMIZATION)
+        # Target high-volume categories (Crypto, Sports, Politics, Pop Culture)
+        # Skip if MM_TARGET_CATEGORIES is empty (disabled)
+        if MM_TARGET_CATEGORIES:
+            market_tags = market.get('tags', [])
+            market_events = market.get('events', [])
+            
+            # Combine tags and event names for matching
+            searchable_text = ' '.join([
+                ' '.join(market_tags) if market_tags else '',
+                ' '.join([e.get('title', '') for e in market_events]) if market_events else '',
+                market.get('question', ''),
+                market.get('description', ''),
+            ]).lower()
+            
+            # Check if any target category appears in market metadata
+            category_match = any(
+                category.lower() in searchable_text 
+                for category in MM_TARGET_CATEGORIES
+            )
+            
+            if not category_match:
+                return False
+        
         # Binary market check (Gamma API - Per Polymarket Support Jan 2026)
         # CRITICAL: Fields are JSON-encoded strings, NOT native arrays
         import json
