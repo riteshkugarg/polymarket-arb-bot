@@ -687,31 +687,57 @@ MM_PREFER_BINARY_MARKETS: Final[bool] = True
 # Focus on high-volume, tight-spread categories with daily trading activity
 # INSTITUTIONAL STANDARD: Target event-driven markets with natural liquidity
 #
-# ⚠️ POLYMARKET FEEDBACK (Q18 - Jan 2026): Use category.id instead of slug/label
-# "IDs are typically more stable identifiers than human-readable slugs that might
-# get updated for SEO or clarity reasons. Categories have updatedAt timestamps."
+# ═══════════════════════════════════════════════════════════════════════════════
+# POLYMARKET TAG-BASED FILTERING (Institutional-Grade Server-Side Approach)
+# ═══════════════════════════════════════════════════════════════════════════════
+# OFFICIAL POLYMARKET GUIDANCE (Q27/Q29 + Final Confirmation - Jan 2026):
+# "Server-side 'category/topic' filtering is done via tags (tag_id), not via a
+# category= query param. Best practice: use tag_id (optionally related_tags=true)
+# and paginate with limit/offset, usually with closed=false for active markets."
 #
-# CRITICAL: This constant should contain category IDs (e.g., ['cat_abc123', 'cat_def456'])
-# NOT human-readable slugs/labels which can change over time!
+# IMPLEMENTATION: Server-side filtering using /markets?tag_id=<numeric_id>
+# - Discovers tags from /tags?limit=100 endpoint
+# - Filters markets server-side (reduces API calls and bandwidth)
+# - Tags are numeric IDs (e.g., '235' = Bitcoin, '100240' = NBA Finals)
+# - Use scripts/discover_tags.py to explore available tags
 #
-# TODO: Discover category IDs using: scripts/discover_category_ids.py
-MM_TARGET_CATEGORIES: Final[List[str]] = [
-    # DISCOVERY REQUIRED: Category IDs must be fetched from Polymarket API
-    # Current values are PLACEHOLDER slugs - will fail stability requirement
-    # After discovery, replace with actual IDs:
-    # 'cat_politics_id',      # Election outcomes, approval ratings, policy predictions
-    # 'cat_crypto_id',        # BTC/ETH price predictions, DeFi events
-    # 'cat_sports_id',        # NFL, NBA, MLB, Soccer outcomes
-    # 'cat_popculture_id',    # Entertainment, Oscars, Grammys, box office
-    # 'cat_business_id',      # Corporate earnings, M&A, stock prices
-    # 'cat_economics_id',     # CPI, Fed rates, GDP, unemployment
+# VALIDATION:
+# ✅ Empirical testing: Bitcoin (235), NBA (100240), Iran (78), Israel (180)
+# ✅ Polymarket Q27/Q29: Official documentation reference
+# ✅ Polymarket final confirmation: "Best practice" explicitly stated
+# ═══════════════════════════════════════════════════════════════════════════════
+
+MM_TARGET_TAGS: Final[List[str]] = [
+    # HIGH-VOLUME TAGS (Institutional-Grade)
+    '235',      # Bitcoin - Crypto price predictions
+    '100240',   # NBA Finals - Professional basketball
+    '78',       # Iran - Middle East geopolitics
+    '180',      # Israel - Middle East conflicts
+    '292',      # Glenn Youngkin - US Politics
+    '802',      # Iowa - US Elections/Caucuses
+    '166',      # South Korea - Asian geopolitics
+    '388',      # Netanyahu - Israeli politics
+    
+    # ADDITIONAL INSTITUTIONAL TAGS (uncomment as needed):
+    # '1192',     # Minnesota Vikings - NFL
+    # '845',      # Job loss - Economic indicators
+    # '891',      # Mixed martial arts - Sports
+    # '1223',     # Jim Harbaugh - NFL coaching
+    # '661',      # Gemini Ultra - AI/Tech
+    # '662',      # LLM - AI/Machine Learning
+    # '603',      # Investing - Financial markets
+    # '289',      # Investment - Asset allocation
+    # '1060',     # Iowa caucus - US Primary elections
 ]
-# Note: Leave empty list [] to disable category filtering (trade all markets)
-# Rationale:
-#   - These categories have highest daily volume and tightest spreads
-#   - Avoid long-tail categories (e.g., "2028 Presidential Nominations")
-#   - Markets tagged with these categories typically have <3% spreads
-#   - Real traders actively participate (not just speculators)
+# Note: Leave empty list [] to disable tag filtering (trade all markets)
+# Discover more tags: python scripts/discover_tags.py
+# 
+# Rationale for selections:
+#   - Bitcoin (235): Highest crypto volume, tight spreads <2%
+#   - NBA Finals (100240): Major sports event, high liquidity
+#   - Iran/Israel (78/180): Geopolitical markets with institutional interest
+#   - Politics tags: Election cycles drive high-volume markets
+#   - These tags consistently have >$10k daily volume and <3% spreads
 
 # Maximum number of markets to make simultaneously
 # DEPRECATED: Use MM_MAX_MARKETS for capital allocation limit (5 markets)

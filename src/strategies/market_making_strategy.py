@@ -68,7 +68,7 @@ from config.constants import (
     MM_MAX_SPREAD_PERCENT,
     MM_PREFER_BINARY_MARKETS,
     MM_MAX_ACTIVE_MARKETS,  # Deprecated, use MM_MAX_MARKETS
-    MM_TARGET_CATEGORIES,  # TRADING OPTIMIZATION: Category filtering
+    MM_TARGET_TAGS,  # TRADING OPTIMIZATION: Server-side tag filtering
     
     # Position sizing
     MM_BASE_POSITION_SIZE,
@@ -1681,54 +1681,106 @@ class MarketMakingStrategy(BaseStrategy):
         logger.debug("Scanning for eligible market making opportunities...")
         
         try:
-            # GAMMA API: Fetch markets with volume/liquidity data
-            # Per Polymarket Support: CLOB client.get_markets() doesn't include volume/liquidity
-            # Use Gamma API directly: https://gamma-api.polymarket.com/markets
+            # GAMMA API: Server-side tag filtering (INSTITUTIONAL-GRADE)
+            # POLYMARKET OFFICIAL GUIDANCE: "Server-side filtering is done via tags (tag_id)"
+            # Use /markets?tag_id=<id>&closed=false&limit=100&offset=0
             all_markets = []
-            next_cursor = None
-            max_pages = 10  # Fetch up to 1000 markets
             
             # Use POLYMARKET_GAMMA_API_URL from config
             from config.constants import POLYMARKET_GAMMA_API_URL
             
             async with aiohttp.ClientSession() as session:
-                for page in range(max_pages):
-                    if next_cursor == 'END':
-                        break
+                if MM_TARGET_TAGS:
+                    # SERVER-SIDE TAG FILTERING (Polymarket Best Practice)
+                    logger.info(f"Using server-side tag filtering with {len(MM_TARGET_TAGS)} tags")
                     
-                    # Build Gamma API URL
-                    url = f"{POLYMARKET_GAMMA_API_URL}/markets"
-                    params = {
-                        'active': 'true',
-                        'closed': 'false',  # Only open markets
-                        'limit': '1000'     # Max markets per page
-                    }
-                    if next_cursor:
-                        params['next_cursor'] = next_cursor
+                    for tag_id in MM_TARGET_TAGS:
+                        # Build Gamma API URL with tag_id parameter
+                        url = f"{POLYMARKET_GAMMA_API_URL}/markets"
+                        params = {
+                            'tag_id': tag_id,
+                            'closed': 'false',      # Active markets only
+                            'related_tags': 'true', # Broader matching (optional)
+                            'limit': '100',         # Pagination
+                            'offset': '0'
+                        }
+                        
+                        try:
+                            # Fetch from Gamma API with server-side filtering
+                            async with session.get(url, params=params, timeout=10) as resp:
+                                if resp.status != 200:
+                                    logger.warning(f"Gamma API error for tag_id={tag_id}: {resp.status}")
+                                    continue
+                                
+                                response = await resp.json()
+                                
+                                # Gamma API returns list directly for tag filtering
+                                if isinstance(response, list):
+                                    tag_markets = response
+                                else:
+                                    tag_markets = response.get('data', [])
+                                
+                                if tag_markets:
+                                    all_markets.extend(tag_markets)
+                                    logger.debug(
+                                        f"[SERVER-SIDE FILTER] tag_id={tag_id}: {len(tag_markets)} markets | "
+                                        f"Sample: {tag_markets[0].get('question', '')[:50] if tag_markets else 'N/A'}..."
+                                    )
+                                else:
+                                    logger.debug(f"[SERVER-SIDE FILTER] tag_id={tag_id}: 0 markets (no active markets with this tag)")
+                        
+                        except Exception as e:
+                            logger.error(f"Error fetching markets for tag_id={tag_id}: {e}")
+                            continue
                     
-                    # Fetch from Gamma API
-                    async with session.get(url, params=params, timeout=10) as resp:
-                        if resp.status != 200:
-                            logger.error(f"Gamma API error: {resp.status}")
+                    # Remove duplicates (markets can have multiple tags)
+                    unique_markets = {}
+                    for market in all_markets:
+                        market_id = market.get('id')
+                        if market_id and market_id not in unique_markets:
+                            unique_markets[market_id] = market
+                    
+                    all_markets = list(unique_markets.values())
+                    logger.info(f"[SERVER-SIDE FILTERING] Total unique markets: {len(all_markets)} (deduped from {len(MM_TARGET_TAGS)} tags)")
+                    
+                else:
+                    # NO TAG FILTERING: Fetch all active markets (fallback)
+                    logger.warning("MM_TARGET_TAGS is empty - fetching ALL active markets (not recommended)")
+                    next_cursor = None
+                    max_pages = 10
+                    
+                    for page in range(max_pages):
+                        if next_cursor == 'END':
                             break
                         
-                        response = await resp.json()
+                        url = f"{POLYMARKET_GAMMA_API_URL}/markets"
+                        params = {
+                            'active': 'true',
+                            'closed': 'false',
+                            'limit': '100'
+                        }
+                        if next_cursor:
+                            params['next_cursor'] = next_cursor
                         
-                        # Gamma API returns list directly, not {'data': [...]}
-                        if isinstance(response, list):
-                            page_markets = response
-                            next_cursor = 'END'  # No pagination for list response
-                        else:
-                            # Handle dict response with pagination
-                            page_markets = response.get('data', [])
-                            next_cursor = response.get('next_cursor', 'END')
-                        
-                        if not page_markets:
-                            break
-                        
-                        all_markets.extend(page_markets)
-                        
-                        logger.debug(f"Fetched Gamma API page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
+                        async with session.get(url, params=params, timeout=10) as resp:
+                            if resp.status != 200:
+                                logger.error(f"Gamma API error: {resp.status}")
+                                break
+                            
+                            response = await resp.json()
+                            
+                            if isinstance(response, list):
+                                page_markets = response
+                                next_cursor = 'END'
+                            else:
+                                page_markets = response.get('data', [])
+                                next_cursor = response.get('next_cursor', 'END')
+                            
+                            if not page_markets:
+                                break
+                            
+                            all_markets.extend(page_markets)
+                            logger.debug(f"Fetched page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
             
             logger.debug(f"Total markets fetched from Gamma API: {len(all_markets)}")
             
@@ -2167,67 +2219,31 @@ class MarketMakingStrategy(BaseStrategy):
         # FILTER 7: CATEGORY SPECIALIZATION (High-Signal Categories)
         # ═══════════════════════════════════════════════════════════════════════════════
         # POLYMARKET FEEDBACK (Phase 2): Use structured categories array
-        # "Use the categories array for primary classification. This gives you precise
-        # category matching with standardized identifiers instead of unreliable text-based
-        # pattern matching."
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 7: TAG-BASED FILTERING (Server-Side - REMOVED from client logic)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # POLYMARKET OFFICIAL GUIDANCE (Q27/Q29 + Final Confirmation - Jan 2026):
+        # "Server-side filtering is done via tags (tag_id) parameter in /markets endpoint.
+        # This is the institutional best practice - filtering happens server-side before
+        # markets reach the client, reducing API calls and bandwidth."
         #
-        # POLYMARKET FEEDBACK (Q18 - Jan 2026): Use category.id for stability
-        # "IDs are typically more stable identifiers than human-readable slugs that
-        # might get updated for SEO or clarity reasons. Slugs have updatedAt timestamps."
+        # IMPLEMENTATION CHANGE:
+        # - OLD: Client-side category filtering (match market.categories array)
+        # - NEW: Server-side tag_id filtering (in _scan_markets_for_making)
+        # - Markets reaching this function are ALREADY filtered by tags
+        # - No need for additional client-side filtering
+        #
+        # REMOVED LOGIC:
+        # - categories array matching (now handled by tag_id parameter)
+        # - Text-based keyword matching (unreliable, per Polymarket)
+        # - category.slug fallback (unstable identifiers)
+        #
+        # If you see markets here that shouldn't qualify, adjust MM_TARGET_TAGS
+        # in constants.py, not this filtering logic.
+        # ═══════════════════════════════════════════════════════════════════════════════
         
-        # Check if market has structured category data
-        categories = market.get('categories', [])
-        
-        category_match = False
-        
-        if categories and isinstance(categories, list) and MM_TARGET_CATEGORIES:
-            # PRIMARY: Match by stable category.id (Polymarket recommendation)
-            for cat in categories:
-                if isinstance(cat, dict):
-                    cat_id = cat.get('id', '')
-                    if cat_id in MM_TARGET_CATEGORIES:
-                        category_match = True
-                        logger.debug(
-                            f"[CATEGORY MATCH] {market_id}: Matched category.id={cat_id}"
-                        )
-                        break
-        
-        if not category_match and categories and isinstance(categories, list) and not MM_TARGET_CATEGORIES:
-            # FALLBACK: If no category IDs configured yet, use slug matching (temporary)
-            # This maintains backward compatibility until category IDs are discovered
-            priority_category_slugs = [
-                'crypto', 'cryptocurrency', 'bitcoin', 'ethereum',  # Crypto
-                'politics', 'elections', 'us-politics',  # Politics
-                'sports', 'nfl', 'nba', 'soccer',  # Sports
-            ]
-            for cat in categories:
-                if isinstance(cat, dict):
-                    cat_slug = cat.get('slug', '').lower()
-                    if any(priority_slug in cat_slug for priority_slug in priority_category_slugs):
-                        category_match = True
-                        logger.debug(
-                            f"[CATEGORY MATCH] {market_id}: Matched category.slug={cat_slug} "
-                            f"(FALLBACK - should use category.id)"
-                        )
-                        break
-        
-        if not category_match:
-            # Fallback: Check text-based keywords if no structured categories
-            # (for markets without category metadata)
-            priority_keywords = [
-                'crypto', 'bitcoin', 'ethereum', 'btc', 'eth',
-                'politics', 'election', 'president', 'trump', 'biden',
-                'nfl', 'nba', 'super bowl', 'playoffs',
-            ]
-            category_match = any(keyword in searchable_text for keyword in priority_keywords)
-        
-        if MM_TARGET_CATEGORIES and not category_match:
-            # If we have target categories configured, reject non-matching markets
-            logger.debug(
-                f"[TIER-1 REJECT] {market_id}: CATEGORY - "
-                f"Market doesn't match priority keywords | Question: {question[:50]}..."
-            )
-            return False
+        # No client-side category filtering needed - already filtered server-side
+        # This comment serves as documentation for why Filter 7 is now a no-op
         
         # ═══════════════════════════════════════════════════════════════════════════════
         # FILTER 8: RISK-ADJUSTED SIZING (Tick Size Validation)
