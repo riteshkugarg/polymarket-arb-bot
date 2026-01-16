@@ -51,6 +51,7 @@ from strategies.base_strategy import BaseStrategy
 from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
 from core.market_data_manager import MarketDataManager, FillEvent, MarketSnapshot
+from core.blacklist_manager import MarketBlacklistManager
 from config.constants import (
     # Budget allocation
     MARKET_MAKING_STRATEGY_CAPITAL,
