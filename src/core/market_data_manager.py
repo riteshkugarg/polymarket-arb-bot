@@ -1016,7 +1016,11 @@ class PolymarketWSManager:
                 logger.error(f"Fill processor error: {e}", exc_info=True)
     
     async def _stale_data_monitor(self) -> None:
-        """Monitor for stale data and log warnings"""
+        """Monitor for stale data and log warnings
+        
+        Uses DATA_STALENESS_THRESHOLD (5s) to avoid false positives for inactive markets.
+        Per Polymarket support: Markets with no trading activity won't send WebSocket updates.
+        """
         while self._is_running:
             try:
                 await asyncio.sleep(1.0)
@@ -1025,7 +1029,7 @@ class PolymarketWSManager:
                 if stale_markets:
                     logger.warning(
                         f"⚠️ STALE DATA: {len(stale_markets)} markets have not "
-                        f"received updates in 2+ seconds: {list(stale_markets)[:5]}"
+                        f"received updates in {self.cache._stale_threshold}+ seconds: {list(stale_markets)[:5]}"
                     )
                     
             except asyncio.CancelledError:
@@ -1411,7 +1415,7 @@ class MarketDataManager:
         """
         Get all markets with stale data (LAG CIRCUIT BREAKER)
         
-        Returns set of asset_ids that haven't been updated in 2+ seconds.
+        Returns set of asset_ids that haven't been updated beyond DATA_STALENESS_THRESHOLD.
         Strategies should use this to trigger emergency quote cancellation.
         """
         return self.cache.get_stale_markets()
