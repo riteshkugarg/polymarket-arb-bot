@@ -20,7 +20,7 @@ from concurrent.futures import ProcessPoolExecutor
 from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
 from py_clob_client.order_builder.constants import BUY, SELL
 
-from src.config.constants import (
+from config.constants import (
     ENABLE_POST_ONLY_ORDERS,
     POST_ONLY_SPREAD_OFFSET,
     DYNAMIC_SPREAD_CAPTURE_PCT,
@@ -30,15 +30,15 @@ from src.config.constants import (
     ORDER_MONITOR_INTERVAL_SEC,
     ENABLE_NEGRISK_AUTO_DETECTION,
 )
-from src.utils.logger import get_logger
-from src.utils.exceptions import (
+from utils.logger import get_logger
+from utils.exceptions import (
     PostOnlyOrderRejectedError,
     NegRiskSignatureError,
     StaleOrderError,
     OrderExecutionError,
     InsufficientBalanceError,
 )
-from src.utils.rebate_logger import get_rebate_logger
+from utils.rebate_logger import get_rebate_logger
 
 logger = get_logger(__name__)
 rebate_logger = get_rebate_logger()

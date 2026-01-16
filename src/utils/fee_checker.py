@@ -15,7 +15,7 @@ import aiohttp
 import logging
 from typing import Optional
 
-from src.config.constants import CLOB_API_URL
+from config.constants import CLOB_API_URL
 
 logger = logging.getLogger(__name__)
 

@@ -29,10 +29,10 @@ import time
 from collections import deque, defaultdict
 from threading import RLock
 
-from src.core.polymarket_client import PolymarketClient
-from src.core.order_manager import OrderManager
-from src.utils.logger import get_logger
-from src.utils.exceptions import OrderExecutionError
+from core.polymarket_client import PolymarketClient
+from core.order_manager import OrderManager
+from utils.logger import get_logger
+from utils.exceptions import OrderExecutionError
 
 
 logger = get_logger(__name__)

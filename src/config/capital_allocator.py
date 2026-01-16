@@ -8,7 +8,7 @@ This module implements percentage-based capital allocation following institution
 - Safety caps and minimum thresholds
 
 Usage:
-    from src.config.capital_allocator import calculate_strategy_capital
+    from config.capital_allocator import calculate_strategy_capital
     
     allocations = calculate_strategy_capital(current_balance=72.92)
     # Returns: {
@@ -22,7 +22,7 @@ Usage:
 """
 
 from typing import Dict
-from src.config.constants import (
+from config.constants import (
     MM_CAPITAL_ALLOCATION_PCT,
     ARB_CAPITAL_ALLOCATION_PCT,
     RESERVE_BUFFER_PCT,
@@ -119,7 +119,7 @@ def calculate_drawdown_limit(peak_equity: float) -> float:
         >>> calculate_drawdown_limit(1000.0)
         50.0
     """
-    from src.config.constants import DRAWDOWN_LIMIT_PCT
+    from config.constants import DRAWDOWN_LIMIT_PCT
     return peak_equity * DRAWDOWN_LIMIT_PCT
 
 
@@ -142,7 +142,7 @@ def calculate_max_exposure(current_balance: float) -> float:
         >>> calculate_max_exposure(1000.0)
         950.0
     """
-    from src.config.constants import MAX_TOTAL_EXPOSURE_PCT
+    from config.constants import MAX_TOTAL_EXPOSURE_PCT
     return current_balance * MAX_TOTAL_EXPOSURE_PCT
 
 

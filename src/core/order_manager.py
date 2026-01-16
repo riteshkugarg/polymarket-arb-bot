@@ -8,22 +8,22 @@ from decimal import Decimal
 import asyncio
 from py_clob_client.clob_types import OrderArgs, OrderType
 
-from src.config.constants import (
+from config.constants import (
     MAX_SLIPPAGE_PERCENT,
     MAX_POSITION_SIZE_USD,
     ENTRY_PRICE_GUARD,
     MM_GLOBAL_DAILY_LOSS_LIMIT,  # Circuit breaker protection
 )
-from src.core.polymarket_client import PolymarketClient
-from src.utils.logger import get_logger, log_trade_event
-from src.utils.exceptions import (
+from core.polymarket_client import PolymarketClient
+from utils.logger import get_logger, log_trade_event
+from utils.exceptions import (
     OrderRejectionError,
     SlippageExceededError,
     PriceGuardError,
     InsufficientBalanceError,
     TradingError,
 )
-from src.utils.helpers import (
+from utils.helpers import (
     validate_slippage,
     validate_entry_price_guard,
     validate_order_parameters,

@@ -45,20 +45,20 @@ import asyncio
 from datetime import datetime
 from decimal import Decimal
 
-from src.strategies.base_strategy import BaseStrategy
-from src.strategies.arb_scanner import ArbScanner, AtomicExecutor, ArbitrageOpportunity
-from src.core.polymarket_client import PolymarketClient
-from src.core.order_manager import OrderManager
-from src.core.atomic_depth_aware_executor import AtomicDepthAwareExecutor, ExecutionPhase
-from src.core.market_data_manager import MarketDataManager, FillEvent
-from src.core.blacklist_manager import MarketBlacklistManager  # INSTITUTIONAL: Pre-emptive zombie filtering
-from src.config.constants import (
+from strategies.base_strategy import BaseStrategy
+from strategies.arb_scanner import ArbScanner, AtomicExecutor, ArbitrageOpportunity
+from core.polymarket_client import PolymarketClient
+from core.order_manager import OrderManager
+from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor, ExecutionPhase
+from core.market_data_manager import MarketDataManager, FillEvent
+from core.blacklist_manager import MarketBlacklistManager  # INSTITUTIONAL: Pre-emptive zombie filtering
+from config.constants import (
     PROXY_WALLET_ADDRESS,
     API_TIMEOUT_SEC,
     MAX_RETRIES,
 )
-from src.utils.logger import get_logger, log_trade_event
-from src.utils.exceptions import StrategyError
+from utils.logger import get_logger, log_trade_event
+from utils.exceptions import StrategyError
 
 
 logger = get_logger(__name__)

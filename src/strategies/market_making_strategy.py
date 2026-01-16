@@ -47,13 +47,13 @@ import json
 from collections import deque
 import statistics
 
-from src.strategies.base_strategy import BaseStrategy
-from src.core.polymarket_client import PolymarketClient
-from src.core.order_manager import OrderManager
-from src.core.market_data_manager import MarketDataManager, FillEvent, MarketSnapshot
-from src.core.blacklist_manager import MarketBlacklistManager
-from src.core.tag_manager import DynamicTagManager
-from src.config.constants import (
+from strategies.base_strategy import BaseStrategy
+from core.polymarket_client import PolymarketClient
+from core.order_manager import OrderManager
+from core.market_data_manager import MarketDataManager, FillEvent, MarketSnapshot
+from core.blacklist_manager import MarketBlacklistManager
+from core.tag_manager import DynamicTagManager
+from config.constants import (
     # Budget allocation
     MARKET_MAKING_STRATEGY_CAPITAL,
     
@@ -123,9 +123,9 @@ from src.config.constants import (
     MM_OBI_THRESHOLD,
     MM_MOMENTUM_PROTECTION_TIME,
 )
-from src.utils.logger import get_logger
-from src.utils.exceptions import StrategyError
-from src.utils.rate_limiter import TokenBucketRateLimiter, ORDER_PLACEMENT_RATE_LIMITER
+from utils.logger import get_logger
+from utils.exceptions import StrategyError
+from utils.rate_limiter import TokenBucketRateLimiter, ORDER_PLACEMENT_RATE_LIMITER
 
 
 logger = get_logger(__name__)

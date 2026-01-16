@@ -18,15 +18,15 @@ from decimal import Decimal, ROUND_DOWN
 import asyncio
 from functools import wraps
 
-from src.utils.logger import get_logger
-from src.utils.exceptions import (
+from utils.logger import get_logger
+from utils.exceptions import (
     DataValidationError,
     InvalidOrderError,
     PriceGuardError,
     SlippageExceededError,
     CircuitBreakerError,
 )
-from src.config.constants import (
+from config.constants import (
     MIN_BUY_PRICE,
     MAX_BUY_PRICE,
     MAX_SLIPPAGE_PERCENT,

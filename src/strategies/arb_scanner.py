@@ -55,17 +55,17 @@ import asyncio
 import time
 from enum import Enum
 
-from src.core.polymarket_client import PolymarketClient
-from src.core.order_manager import OrderManager
-from src.core.market_data_manager import MarketDataManager, MarketSnapshot
-from src.config.constants import (
+from core.polymarket_client import PolymarketClient
+from core.order_manager import OrderManager
+from core.market_data_manager import MarketDataManager, MarketSnapshot
+from config.constants import (
     ARBITRAGE_STRATEGY_CAPITAL,
     ARBITRAGE_TAKER_FEE_PERCENT,
     ARB_DATA_STALENESS_THRESHOLD,  # Arbitrage: 1s (Polymarket rec: 0.5-1s)
     DATA_STALENESS_THRESHOLD,  # Legacy backward compatibility
 )
-from src.utils.logger import get_logger
-from src.utils.exceptions import (
+from utils.logger import get_logger
+from utils.exceptions import (
     OrderRejectionError,
     SlippageExceededError,
     InsufficientBalanceError,

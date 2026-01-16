@@ -16,7 +16,7 @@ from py_clob_client.exceptions import PolyApiException
 from eth_account import Account
 from web3 import Web3
 
-from src.config.constants import (
+from config.constants import (
     CHAIN_ID,
     CLOB_API_URL,
     FUNDER_ADDRESS,
@@ -30,16 +30,16 @@ from src.config.constants import (
     CTF_CONTRACT_ADDRESS,
     POLYGON_RPC_URL,
 )
-from src.config.aws_config import get_aws_config
-from src.utils.logger import get_logger
-from src.utils.exceptions import (
+from config.aws_config import get_aws_config
+from utils.logger import get_logger
+from utils.exceptions import (
     APIError,
     AuthenticationError,
     OrderRejectionError,
     InsufficientBalanceError,
     NetworkError
 )
-from src.utils.helpers import async_retry_with_backoff
+from utils.helpers import async_retry_with_backoff
 
 
 logger = get_logger(__name__)

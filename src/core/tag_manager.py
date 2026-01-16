@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 import aiohttp
 from dataclasses import dataclass
 
-from src.config.constants import (
+from config.constants import (
     POLYMARKET_GAMMA_API_URL,
     MM_TARGET_TAGS,
     DYNAMIC_TAG_REFRESH_HOURS,
