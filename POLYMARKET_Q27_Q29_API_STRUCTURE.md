@@ -1,18 +1,21 @@
-# Polymarket API Structure - RESOLVED ✅
+# Polymarket API Structure - FULLY RESOLVED ✅
 
 **Date**: January 16, 2026  
-**Status**: RESOLVED - Implementation path confirmed  
-**Resolution**: Use `tag_id` parameter for server-side filtering (Q27/Q29 approach validated)
+**Status**: FULLY RESOLVED - Implementation confirmed by Polymarket  
+**Resolution**: Use `tag_id` parameter for server-side filtering (Official confirmation received)
 
 ---
 
 ## Executive Summary
 
-**RESOLVED**: After receiving clarification from Polymarket support (Q22 follow-up, Q27-Q29) and conducting empirical API testing, we have confirmed the correct implementation approach:
+**FULLY RESOLVED**: After receiving multiple clarifications from Polymarket support (Q22 follow-up, Q27-Q29, final confirmation) and conducting comprehensive empirical API testing, we have confirmed the correct institutional-grade implementation:
 
 ✅ **Use `tag_id` parameter** for server-side filtering (numeric IDs from `/tags` endpoint)  
-❌ **DO NOT use `category` parameter** - it's broken (ignores filter value)  
-📊 **Markets DON'T have `tags` field** - filtering happens server-side, no client-side validation needed
+✅ **Use `related_tags=true`** optionally for broader matching  
+✅ **Use `closed=false`** to filter active markets only  
+✅ **Pagination**: `limit`/`offset` for scalable queries  
+❌ **DO NOT use `category` parameter** - not the correct filtering mechanism  
+📊 **Markets MAY have `tags`/`categories` arrays** - but not required for filtering
 
 ---
 
@@ -90,6 +93,22 @@ Returns 0 markets (tag filtering appears to not work with numeric IDs)
 > 1. Discover tag ID: `GET https://gamma-api.polymarket.com/tags`
 > 2. Filter markets: `GET https://gamma-api.polymarket.com/markets?tag_id=100381&closed=false&limit=25`
 
+### FINAL CONFIRMATION (Received Jan 16, 2026)
+**Summary**: Official best practice confirmed ✅
+
+> "In our docs, server-side 'category/topic' filtering is done via tags (tag_id), not via a category= query param."
+>
+> "Best practice: keep using tag_id (optionally related_tags=true) and paginate with limit/offset, usually with closed=false for active markets."
+>
+> **Official Example**:
+> ```bash
+> curl "https://gamma-api.polymarket.com/markets?tag_id=100381&closed=false&limit=25&offset=0"
+> ```
+>
+> "On the response side, market objects can include tags and categories arrays (objects with fields like id, label, slug)"
+
+**✅ INSTITUTIONAL-GRADE APPROACH CONFIRMED**: This is the official recommended implementation from Polymarket.
+
 ---
 
 ## Empirical API Testing Results ✅
@@ -160,39 +179,55 @@ nonexistent:[517310, 517311, 517313]  # IDENTICAL (even fake category!)
 
 ## Final Verdict 🏆
 
-**RESOLVED IMPLEMENTATION**:
+**INSTITUTIONAL-GRADE IMPLEMENTATION CONFIRMED**:
 
-✅ **Use Q27/Q29 Approach**: Server-side filtering with `tag_id` parameter  
+✅ **Use tag_id parameter** - Official Polymarket best practice  
 ✅ **Use numeric tag IDs** from `/tags?limit=100` endpoint  
-✅ **Ignore Q22 guidance** - tag_id filtering is NOT unreliable, it works perfectly  
-❌ **DO NOT use `category` parameter** - it's broken (accepts any value, returns same results)  
-❌ **Markets don't have `tags` field** - don't try to validate client-side
+✅ **Use `related_tags=true`** - Optional for broader matching  
+✅ **Use `closed=false`** - Filter active markets only  
+✅ **Use `limit`/`offset`** - Pagination for scalable queries  
+❌ **DO NOT use `category` parameter** - Not the filtering mechanism (confirmed)  
+ℹ️ **Markets MAY have `tags`/`categories` arrays** - Present in some responses but not required
 
-**Working Implementation**:
+**Official Working Implementation**:
 ```python
 # 1. Discover tags once (cache results)
 tags = requests.get('https://gamma-api.polymarket.com/tags?limit=100').json()
 # Returns: [{"id": "235", "label": "Bitcoin", "slug": "bitcoin"}, ...]
 
-# 2. Filter markets server-side by tag_id
-TARGET_TAG_IDS = ['235', '100240', '78', '180']  # Bitcoin, NBA, Iran, Israel
+# 2. Filter markets server-side by tag_id (POLYMARKET OFFICIAL APPROACH)
+TARGET_TAG_IDS = ['235', '100240', '78', '180']  # Bitcoin, NBA Finals, Iran, Israel
 
 for tag_id in TARGET_TAG_IDS:
     markets = requests.get(
         'https://gamma-api.polymarket.com/markets',
         params={
             'tag_id': tag_id,
-            'closed': 'false',
-            'limit': 100
+            'closed': 'false',        # Active markets only
+            'related_tags': 'true',   # Optional: broader matching
+            'limit': 100,             # Pagination
+            'offset': 0
         }
     ).json()
     # Returns only markets matching this specific tag!
+```
+
+**Official Polymarket Example**:
+```bash
+curl "https://gamma-api.polymarket.com/markets?tag_id=100381&closed=false&limit=25&offset=0"
 ```
 
 **Performance Impact**:
 - ✅ Reduced API calls: 4 targeted queries vs 1 massive fetch + client-side filtering
 - ✅ Reduced bandwidth: Only relevant markets returned
 - ✅ Reduced compute: No client-side filtering logic needed
+- ✅ Scalable pagination: Handle large result sets efficiently
+
+**Validation Status**:
+- ✅ Empirical testing: Bitcoin, NBA, Iran, Israel tags all working
+- ✅ Polymarket Q27/Q29: Official documentation reference
+- ✅ Polymarket final confirmation: "Best practice" explicitly stated
+- ✅ Ready for production deployment
 
 ---
 
