@@ -23,18 +23,18 @@ from eth_abi import encode
 # Add src to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.core.polymarket_client import PolymarketClient
-from src.core.order_manager import OrderManager
-from src.core.atomic_depth_aware_executor import AtomicDepthAwareExecutor
-from src.core.maker_executor import get_maker_executor
-from src.core.execution_gateway import ExecutionGateway, StrategyPriority
-from src.core.inventory_manager import InventoryManager
-from src.core.risk_controller import RiskController
-from src.strategies.arbitrage_strategy import ArbitrageStrategy
-from src.strategies.arb_scanner import ArbScanner
-from src.strategies.market_making_strategy import MarketMakingStrategy
-from src.core.market_data_manager import MarketDataManager
-from src.config.constants import (
+from core.polymarket_client import PolymarketClient
+from core.order_manager import OrderManager
+from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor
+from core.maker_executor import get_maker_executor
+from core.execution_gateway import ExecutionGateway, StrategyPriority
+from core.inventory_manager import InventoryManager
+from core.risk_controller import RiskController
+from strategies.arbitrage_strategy import ArbitrageStrategy
+from strategies.arb_scanner import ArbScanner
+from strategies.market_making_strategy import MarketMakingStrategy
+from core.market_data_manager import MarketDataManager
+from config.constants import (
     LOOP_INTERVAL_SEC,
     HEALTH_CHECK_INTERVAL_SEC,
     MAX_CONSECUTIVE_ERRORS,
@@ -78,9 +78,9 @@ from src.config.constants import (
     ARBITRAGE_STRATEGY_CAPITAL,
     MARKET_MAKING_STRATEGY_CAPITAL,
 )
-from src.utils.logger import get_logger, setup_logging
-from src.utils.rebate_logger import get_rebate_logger
-from src.utils.exceptions import (
+from utils.logger import get_logger, setup_logging
+from utils.rebate_logger import get_rebate_logger
+from utils.exceptions import (
     PolymarketBotError,
     CircuitBreakerError,
     HealthCheckError,
