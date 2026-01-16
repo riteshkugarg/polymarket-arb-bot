@@ -686,13 +686,25 @@ MM_PREFER_BINARY_MARKETS: Final[bool] = True
 # Target Categories for Market Making (TRADING OPTIMIZATION)
 # Focus on high-volume, tight-spread categories with daily trading activity
 # INSTITUTIONAL STANDARD: Target event-driven markets with natural liquidity
+#
+# ⚠️ POLYMARKET FEEDBACK (Q18 - Jan 2026): Use category.id instead of slug/label
+# "IDs are typically more stable identifiers than human-readable slugs that might
+# get updated for SEO or clarity reasons. Categories have updatedAt timestamps."
+#
+# CRITICAL: This constant should contain category IDs (e.g., ['cat_abc123', 'cat_def456'])
+# NOT human-readable slugs/labels which can change over time!
+#
+# TODO: Discover category IDs using: scripts/discover_category_ids.py
 MM_TARGET_CATEGORIES: Final[List[str]] = [
-    "Politics",          # Election outcomes, approval ratings, policy predictions
-    "Crypto",           # BTC/ETH price predictions, DeFi events
-    "Sports",           # NFL, NBA, MLB, Soccer outcomes
-    "Pop Culture",      # Entertainment, Oscars, Grammys, box office
-    "Business",         # Corporate earnings, M&A, stock prices
-    "Economics",        # CPI, Fed rates, GDP, unemployment
+    # DISCOVERY REQUIRED: Category IDs must be fetched from Polymarket API
+    # Current values are PLACEHOLDER slugs - will fail stability requirement
+    # After discovery, replace with actual IDs:
+    # 'cat_politics_id',      # Election outcomes, approval ratings, policy predictions
+    # 'cat_crypto_id',        # BTC/ETH price predictions, DeFi events
+    # 'cat_sports_id',        # NFL, NBA, MLB, Soccer outcomes
+    # 'cat_popculture_id',    # Entertainment, Oscars, Grammys, box office
+    # 'cat_business_id',      # Corporate earnings, M&A, stock prices
+    # 'cat_economics_id',     # CPI, Fed rates, GDP, unemployment
 ]
 # Note: Leave empty list [] to disable category filtering (trade all markets)
 # Rationale:

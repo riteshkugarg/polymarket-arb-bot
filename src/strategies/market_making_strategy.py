@@ -2170,28 +2170,45 @@ class MarketMakingStrategy(BaseStrategy):
         # "Use the categories array for primary classification. This gives you precise
         # category matching with standardized identifiers instead of unreliable text-based
         # pattern matching."
+        #
+        # POLYMARKET FEEDBACK (Q18 - Jan 2026): Use category.id for stability
+        # "IDs are typically more stable identifiers than human-readable slugs that
+        # might get updated for SEO or clarity reasons. Slugs have updatedAt timestamps."
         
         # Check if market has structured category data
         categories = market.get('categories', [])
         
-        # Priority category slugs (institutional-grade high-volume markets)
-        priority_category_slugs = [
-            'crypto', 'cryptocurrency', 'bitcoin', 'ethereum',  # Crypto
-            'politics', 'elections', 'us-politics',  # Politics
-            'sports', 'nfl', 'nba', 'soccer',  # Sports
-        ]
-        
         category_match = False
         
-        if categories and isinstance(categories, list):
-            # Use structured category slugs (Polymarket recommendation)
+        if categories and isinstance(categories, list) and MM_TARGET_CATEGORIES:
+            # PRIMARY: Match by stable category.id (Polymarket recommendation)
+            for cat in categories:
+                if isinstance(cat, dict):
+                    cat_id = cat.get('id', '')
+                    if cat_id in MM_TARGET_CATEGORIES:
+                        category_match = True
+                        logger.debug(
+                            f"[CATEGORY MATCH] {market_id}: Matched category.id={cat_id}"
+                        )
+                        break
+        
+        if not category_match and categories and isinstance(categories, list) and not MM_TARGET_CATEGORIES:
+            # FALLBACK: If no category IDs configured yet, use slug matching (temporary)
+            # This maintains backward compatibility until category IDs are discovered
+            priority_category_slugs = [
+                'crypto', 'cryptocurrency', 'bitcoin', 'ethereum',  # Crypto
+                'politics', 'elections', 'us-politics',  # Politics
+                'sports', 'nfl', 'nba', 'soccer',  # Sports
+            ]
             for cat in categories:
                 if isinstance(cat, dict):
                     cat_slug = cat.get('slug', '').lower()
-                    cat_label = cat.get('label', '').lower()
-                    if any(priority_slug in cat_slug or priority_slug in cat_label 
-                           for priority_slug in priority_category_slugs):
+                    if any(priority_slug in cat_slug for priority_slug in priority_category_slugs):
                         category_match = True
+                        logger.debug(
+                            f"[CATEGORY MATCH] {market_id}: Matched category.slug={cat_slug} "
+                            f"(FALLBACK - should use category.id)"
+                        )
                         break
         
         if not category_match:
