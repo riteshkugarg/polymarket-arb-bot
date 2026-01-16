@@ -19,15 +19,13 @@ logger = get_logger(__name__)
 
 
 # HARD BLACKLIST: Known problematic market patterns
-# These keywords trigger immediate rejection regardless of other market characteristics
+# POLYMARKET FEEDBACK (Jan 2026): Use endDateIso field instead of year regex
+# "This approach is much more reliable than text pattern matching since it uses
+# structured date data rather than parsing question descriptions."
+#
+# INSTITUTIONAL UPGRADE: Removed year keywords ('2027', '2028', '2029', '2030')
+# Now using temporal guardrail with endDateIso field for structured filtering
 HARD_BLACKLIST_KEYWORDS = [
-    # Long-dated political contracts (capital lock risk)
-    '2027',
-    '2028', 
-    '2029',
-    '2030',
-    '2031',
-    '2032',
     # Low-liquidity political nomination markets (pre-primary speculation)
     'presidential-nomination',
     'democrat-nomination',
@@ -39,6 +37,7 @@ HARD_BLACKLIST_KEYWORDS = [
 ]
 
 # TEMPORAL GUARDRAIL: Maximum days until settlement (365 days = 1 year)
+# Uses endDateIso field for precise date filtering (Polymarket recommendation)
 MAX_DAYS_UNTIL_SETTLEMENT = 365
 
 

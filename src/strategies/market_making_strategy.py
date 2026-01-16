@@ -56,7 +56,8 @@ from config.constants import (
     MARKET_MAKING_STRATEGY_CAPITAL,
     
     # WebSocket data staleness threshold
-    DATA_STALENESS_THRESHOLD,
+    MM_DATA_STALENESS_THRESHOLD,  # Market making: 2s (Polymarket rec: 1-2s)
+    DATA_STALENESS_THRESHOLD,  # Legacy backward compatibility
     
     # Market selection - Adaptive Capacity Filtering
     MM_MAX_MARKETS,
@@ -2271,7 +2272,7 @@ class MarketMakingStrategy(BaseStrategy):
         
         logger.info(
             f"[CACHE WARMUP] Waiting for fresh data for {len(asset_ids)} assets "
-            f"(timeout: {timeout}s, staleness threshold: {DATA_STALENESS_THRESHOLD}s)"
+            f"(timeout: {timeout}s, staleness threshold: {MM_DATA_STALENESS_THRESHOLD}s)"
         )
         
         while elapsed < timeout:
@@ -2421,7 +2422,7 @@ class MarketMakingStrategy(BaseStrategy):
         Update quotes for all active positions (parallel execution)
         
         INSTITUTIONAL SAFETY: LAG CIRCUIT BREAKER
-        - Checks for stale data (>{DATA_STALENESS_THRESHOLD}s old) before updating quotes
+        - Checks for stale data (>2s old for market making) before updating quotes
         - Cancels all quotes if any active market has stale data
         - Prevents trading on outdated prices during WebSocket outages
         """
@@ -2438,7 +2439,7 @@ class MarketMakingStrategy(BaseStrategy):
             if self._market_data_manager.check_market_staleness(active_token_ids):
                 stale_markets = self._market_data_manager.get_stale_markets()
                 logger.error(
-                    f"🚨 LAG CIRCUIT BREAKER TRIGGERED: {len(stale_markets)} markets have stale data (>{DATA_STALENESS_THRESHOLD}s)\\n"
+                    f"🚨 LAG CIRCUIT BREAKER TRIGGERED: {len(stale_markets)} markets have stale data (>{MM_DATA_STALENESS_THRESHOLD}s)\\n"
                     f"   Stale assets: {list(stale_markets)[:5]}\\n"
                     f"   ACTION: Cancelling ALL quotes to prevent trading on outdated prices"
                 )

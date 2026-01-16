@@ -172,6 +172,7 @@ class OrderManager:
             max_slippage: Maximum allowed slippage (uses default if not specified)
             is_shares: If True, size represents shares for SELL orders (default: False)
             neg_risk: If True, market is NegRisk and requires special signature (2026)
+                     POLYMARKET CRITICAL: Missing this flag causes "invalid signature" errors
             
         Returns:
             Order execution result

@@ -351,17 +351,28 @@ HEARTBEAT_INTERVAL_SEC: Final[int] = 300  # 5 minutes
 # ============================================================================
 # WEBSOCKET DATA STALENESS THRESHOLD
 # ============================================================================
-# Central threshold for detecting stale market data across all strategies
-# PRODUCTION-GRADE: 5.0s (5s heartbeat + buffer for network jitter)
+# POLYMARKET FEEDBACK (Jan 2026): WebSocket feeds have ~100ms latency
+# Recommended thresholds:
+#   - Market Making: 1-2 seconds (allows for brief network hiccups)
+#   - Arbitrage: 500ms-1 second (immediate execution needs fresher data)
+# 
+# INSTITUTIONAL UPGRADE: Tightened from 5.0s → 2.0s for MM, 1.0s for Arb
+# Previous 5.0s was too loose - arbitrage opportunities disappear in <1s
+# 
 # Used by:
 #   - MarketDataManager: GlobalMarketCache staleness detection
-#   - MarketMakingStrategy: Quote update circuit breaker
+#   - MarketMakingStrategy: Quote update circuit breaker (2.0s)
+#   - ArbitrageStrategy: Pre-execution staleness check (1.0s)
 #   - Cache warmup: Wait for fresh data before quoting
-# Rationale:
-#   - Must accommodate 5s WebSocket heartbeat interval
-#   - Previous 2.0s was too aggressive (false positives during startup)
-#   - Balance: Fast enough to detect real disconnects, tolerant of normal latency
-DATA_STALENESS_THRESHOLD: Final[float] = 5.0  # seconds
+
+# Market Making staleness threshold (conservative for inventory management)
+MM_DATA_STALENESS_THRESHOLD: Final[float] = 2.0  # seconds (Polymarket rec: 1-2s)
+
+# Arbitrage staleness threshold (aggressive for opportunity capture)
+ARB_DATA_STALENESS_THRESHOLD: Final[float] = 1.0  # seconds (Polymarket rec: 0.5-1s)
+
+# Legacy constant for backward compatibility (defaults to MM threshold)
+DATA_STALENESS_THRESHOLD: Final[float] = MM_DATA_STALENESS_THRESHOLD
 
 # Maximum allowed drawdown before emergency kill switch (PERCENTAGE-BASED)
 # INSTITUTIONAL HFT STANDARD: 5% of peak equity for small accounts

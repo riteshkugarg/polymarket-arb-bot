@@ -61,7 +61,8 @@ from core.market_data_manager import MarketDataManager, MarketSnapshot
 from config.constants import (
     ARBITRAGE_STRATEGY_CAPITAL,
     ARBITRAGE_TAKER_FEE_PERCENT,
-    DATA_STALENESS_THRESHOLD,  # INSTITUTIONAL: Use global staleness constant
+    ARB_DATA_STALENESS_THRESHOLD,  # Arbitrage: 1s (Polymarket rec: 0.5-1s)
+    DATA_STALENESS_THRESHOLD,  # Legacy backward compatibility
 )
 from utils.logger import get_logger
 from utils.exceptions import (
@@ -1434,13 +1435,13 @@ class AtomicExecutor:
             TradingError: If any validation fails
         """
         # INSTITUTIONAL CHECK (Phase 1): Staleness validation before execution
-        # Per audit - prevent adverse fills on stale data (>5s old)
+        # Per audit - prevent adverse fills on stale data (>1s old for arbitrage)
         if market_data_manager:
             for outcome in opportunity.outcomes:
                 if market_data_manager.is_market_stale(outcome.token_id):
                     raise TradingError(
                         f"[ARB ABORT] Stale data detected for {outcome.token_id[:8]}... "
-                        f"(>{DATA_STALENESS_THRESHOLD}s since last update). "
+                        f"(>{ARB_DATA_STALENESS_THRESHOLD}s since last update). "
                         f"Aborting to prevent adverse fill."
                     )
                     logger.warning(

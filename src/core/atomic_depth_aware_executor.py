@@ -152,6 +152,8 @@ class AtomicDepthAwareExecutor:
             side: 'BUY' or 'SELL'
             size: Shares per outcome
             order_type: 'FOK', 'IOC', or 'GTC'
+            is_negrisk: POLYMARKET CRITICAL - Must be True for NegRisk markets
+                       Missing this flag causes "invalid signature" errors
             
         Returns:
             AtomicExecutionResult with complete execution details
