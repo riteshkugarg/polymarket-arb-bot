@@ -44,6 +44,8 @@ from src.config.constants import (
     MM_MIN_HOURS_UNTIL_SETTLEMENT,
     MM_MAX_DAYS_UNTIL_SETTLEMENT,
     MM_SETTLEMENT_TIME_WEIGHT,
+    IS_SCALPING_MODE,
+    SCALPING_PRIORITY_TAGS,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,12 +89,21 @@ class DynamicTagManager:
         self.max_retry_delay: float = 16.0  # 16 seconds
         self.max_retries: int = 5
         
+        mode = "🎯 SCALPING MODE" if IS_SCALPING_MODE else "BROAD MODE"
         logger.info(
-            f"DynamicTagManager initialized: "
+            f"DynamicTagManager initialized [{mode}]: "
             f"refresh_hours={self.cache_ttl_hours}, "
             f"min_markets={DYNAMIC_TAG_MIN_MARKETS}, "
-            f"min_volume=${DYNAMIC_TAG_MIN_VOLUME:,.0f}"
+            f"min_volume=${DYNAMIC_TAG_MIN_VOLUME:,.0f}, "
+            f"max_spread={DYNAMIC_TAG_MAX_SPREAD:.1%}"
         )
+        
+        if IS_SCALPING_MODE:
+            logger.info(
+                f"🎯 Scalping Mode Active: "
+                f"Priority tags: {SCALPING_PRIORITY_TAGS}, "
+                f"Settlement: {MM_MIN_HOURS_UNTIL_SETTLEMENT:.2f}h - {MM_MAX_DAYS_UNTIL_SETTLEMENT:.3f} days"
+            )
     
     async def get_active_tags(self) -> List[str]:
         """
@@ -194,14 +205,42 @@ class DynamicTagManager:
         return False
     
     async def _exponential_backoff(self, attempt: int):
-        """Exponential backoff: 1s → 2s → 4s → 8s → 16s"""
-        delay = min(self.base_retry_delay * (2 ** attempt), self.max_retry_delay)
-        logger.info(f"Retrying in {delay}s (exponential backoff)...")
-        await asyncio.sleep(delay)
+        """
+        Exponential backoff with jitter for rate limit protection.
+        
+        SCALPING MODE: More conservative backoff (avoid 429 errors)
+        - Base delay: 2 seconds (vs 1 second in broad mode)
+        - Max delay: 32 seconds (vs 16 seconds in broad mode)
+        - Jitter: ±30% randomization to prevent thundering herd
+        
+        BROAD MODE: Standard exponential backoff
+        - Base delay: 1 second
+        - Max delay: 16 seconds
+        """
+        import random
+        
+        # SCALPING MODE: Double the delays to be more conservative
+        base_delay = 2.0 if IS_SCALPING_MODE else self.base_retry_delay
+        max_delay = 32.0 if IS_SCALPING_MODE else self.max_retry_delay
+        
+        # Calculate exponential delay
+        delay = min(base_delay * (2 ** attempt), max_delay)
+        
+        # Add jitter (±30%) to prevent simultaneous retries
+        jitter_factor = random.uniform(0.7, 1.3)
+        final_delay = delay * jitter_factor
+        
+        logger.info(
+            f"Retrying in {final_delay:.1f}s (exponential backoff with jitter, attempt {attempt + 1})"
+        )
+        await asyncio.sleep(final_delay)
     
     async def _discover_high_volume_tags(self) -> List[TagMetrics]:
         """
         Core discovery algorithm: Fetch tags, analyze markets, score and rank.
+        
+        SCALPING MODE: Priority whitelist tags checked first
+        BROAD MODE: Standard discovery across all tags
         
         Returns:
             List of TagMetrics sorted by score (descending)
@@ -209,6 +248,46 @@ class DynamicTagManager:
         start_time = datetime.utcnow()
         
         async with aiohttp.ClientSession() as session:
+            # SCALPING MODE: Check priority tags first (avoid rate limits)
+            if IS_SCALPING_MODE and SCALPING_PRIORITY_TAGS:
+                logger.info(
+                    f"🎯 SCALPING MODE: Checking {len(SCALPING_PRIORITY_TAGS)} priority tags first: "
+                    f"{SCALPING_PRIORITY_TAGS}"
+                )
+                
+                # Build tag objects for priority tags
+                priority_tag_objs = [{'id': tag_id, 'label': f'Priority-{tag_id}'} for tag_id in SCALPING_PRIORITY_TAGS]
+                
+                # Analyze priority tags with rate limit jitter
+                import random
+                priority_tasks = []
+                for i, tag in enumerate(priority_tag_objs):
+                    # Add jitter to avoid simultaneous API calls (429 prevention)
+                    jitter = random.uniform(0.1, 0.3) * i
+                    await asyncio.sleep(jitter)
+                    priority_tasks.append(self._analyze_tag(session, tag))
+                
+                priority_metrics = await asyncio.gather(*priority_tasks, return_exceptions=True)
+                
+                # Filter valid priority tags
+                valid_priority = [
+                    m for m in priority_metrics
+                    if isinstance(m, TagMetrics) and self._passes_filters(m)
+                ]
+                
+                if valid_priority:
+                    logger.info(
+                        f"✅ Priority tags found: {len(valid_priority)} markets. "
+                        f"Skipping broad discovery to save API quota."
+                    )
+                    valid_priority.sort(key=lambda m: m.score, reverse=True)
+                    return valid_priority
+                else:
+                    logger.warning(
+                        f"⚠️ No valid priority tags found. Falling back to broad discovery."
+                    )
+            
+            # BROAD DISCOVERY (or scalping fallback)
             # Step 1: Fetch all tags
             tags = await self._fetch_all_tags(session)
             if not tags:
@@ -217,8 +296,15 @@ class DynamicTagManager:
             
             logger.info(f"Fetched {len(tags)} total tags from API")
             
-            # Step 2: Analyze each tag's markets (parallel processing)
-            tasks = [self._analyze_tag(session, tag) for tag in tags]
+            # Step 2: Analyze each tag's markets (parallel processing with rate limit jitter)
+            import random
+            tasks = []
+            for i, tag in enumerate(tags):
+                # Add jitter to prevent 429 rate limit errors
+                if i > 0 and i % 10 == 0:  # Every 10 tags, pause
+                    await asyncio.sleep(random.uniform(0.5, 1.0))
+                tasks.append(self._analyze_tag(session, tag))
+            
             tag_metrics_list = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Step 3: Filter out failures and apply criteria
@@ -356,11 +442,23 @@ class DynamicTagManager:
                 avg_spread = sum(spreads) / len(spreads) if spreads else 1.0
                 avg_hours = sum(hours_until_settlement) / len(hours_until_settlement) if hours_until_settlement else 24.0
                 
-                # Compute score: volume-weighted with time decay
+                # SCALPING MODE SCORING: Prioritize time-to-settlement over volume
+                # Formula: score = volume / max(avg_hours, 0.25)
+                # Rationale: 
+                #   - $1000 volume settling in 0.5hr = score 2000 (excellent)
+                #   - $5000 volume settling in 24hr = score 208 (poor)
+                #   - Heavily rewards fast capital rotation
+                #
+                # BROAD MODE SCORING: Traditional volume-weighted with time factor
                 # Formula: score = volume × (1 + settlement_weight / avg_hours)
-                # Rationale: Prefer high volume + short settlement time
-                time_factor = 1 + (MM_SETTLEMENT_TIME_WEIGHT / max(avg_hours, 0.1))
-                score = total_volume * time_factor
+                # Rationale: Volume is primary, time is secondary boost
+                if IS_SCALPING_MODE:
+                    # Scalping: Invert time preference (shorter = exponentially better)
+                    score = total_volume / max(avg_hours, 0.25)
+                else:
+                    # Broad: Volume-weighted with time decay (traditional)
+                    time_factor = 1 + (MM_SETTLEMENT_TIME_WEIGHT / max(avg_hours, 0.1))
+                    score = total_volume * time_factor
                 
                 return TagMetrics(
                     tag_id=tag_id,

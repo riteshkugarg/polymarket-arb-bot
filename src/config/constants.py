@@ -97,6 +97,52 @@ STRATEGY_RESERVE_BUFFER: Final[float] = 2.92  # DEPRECATED: Use RESERVE_BUFFER_P
 # Set to 98% to leave small buffer for fees/gas
 MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.98
 
+# ============================================================================
+# SCALPING MODE (High-Frequency Capital Rotation Strategy)
+# ============================================================================
+# INSTITUTIONAL-GRADE SCALPING CONFIGURATION
+# Purpose: Target ultra-short settlement markets (15m, 30m, 1h)
+# Examples: NBA quarters, Tennis sets, Hourly Crypto price predictions
+#
+# Capital Efficiency:
+# - Traditional: $100 locked for 3 days = $100 capital velocity
+# - Scalping: $100 rotated 8x/day = $800 capital velocity
+#
+# Use Case: Small balance ($72) with 429 rate limits on broad discovery
+# Strategy: Focus on fast-settling, lower-volume markets for rapid turnover
+# ============================================================================
+
+IS_SCALPING_MODE: Final[bool] = os.getenv('SCALPING_MODE', 'false').lower() == 'true'
+
+# Scalping Mode Whitelist: High-priority tag IDs for fast-settling markets
+# These tags are checked FIRST before general discovery
+# Tag 1005: Crypto Hourly (Bitcoin/ETH price predictions, 1hr settlement)
+# Tag 1002: NBA (Quarters, halftime props, rapid settlement)
+# Tag 1007: Tennis (Sets, games, sub-hour outcomes)
+# Note: Actual tag IDs may vary - run scripts/discover_tags.py to verify
+SCALPING_PRIORITY_TAGS: Final[List[str]] = [
+    '1005',  # Crypto Hourly - Bitcoin/ETH price movements
+    '1002',  # NBA - Quarters, halftime, rapid props
+    '1007',  # Tennis - Sets, games, sub-hour markets
+]
+
+# Note: Set environment variable SCALPING_MODE=true to enable
+# Or manually set IS_SCALPING_MODE = True in this file
+
+# Scalping Mode Whitelist: High-priority tag IDs for fast-settling markets
+# Tag 1005: Crypto Hourly (Bitcoin/ETH price predictions, 1hr settlement)
+# Tag 1002: NBA (Quarters, halftime props, rapid settlement)
+# Tag 1007: Tennis (Sets, games, sub-hour outcomes)
+SCALPING_PRIORITY_TAGS: Final[List[str]] = [
+    '1005',  # Crypto Hourly - Bitcoin/ETH price movements
+    '1002',  # NBA - Quarters, halftime, rapid props
+    '1007',  # Tennis - Sets, games, sub-hour markets
+]
+
+# Note: Set environment variable SCALPING_MODE=true to enable
+# Or manually toggle IS_SCALPING_MODE in this file
+MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.98
+
 
 # ============================================================================
 # 2B. ARBITRAGE FEE CONFIGURATION
@@ -801,17 +847,19 @@ MM_TARGET_TAGS: Final[List[str]] = [
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Minimum time until settlement (hours) - avoid same-minute settlements
-# INSTITUTIONAL STANDARD: 15 minutes (0.25 hours)
-# Rationale: Crypto markets often settle in 15min intervals
-MM_MIN_HOURS_UNTIL_SETTLEMENT: Final[float] = 0.25  # 15 minutes
+# SCALPING MODE: 6 minutes (0.1 hours) - capture ultra-short markets
+# BROAD MODE: 15 minutes (0.25 hours) - institutional standard
+# Rationale: Scalping focuses on NBA quarters, tennis sets, hourly crypto
+MM_MIN_HOURS_UNTIL_SETTLEMENT: Final[float] = 0.1 if IS_SCALPING_MODE else 0.25
 
 # Maximum time until settlement (days) - avoid long-term capital lock-up
-# INSTITUTIONAL STANDARD: 3 days maximum
+# SCALPING MODE: 1 hour (0.04 days) - ultra-fast capital rotation
+# BROAD MODE: 3 days - institutional standard
 # Rationale:
-#   - Crypto markets typically <24 hours (15min-1hr-4hr-24hr cadence)
-#   - 3 days allows sports/political events while maintaining velocity
+#   - Scalping: Capital rotated 8-24x/day (NBA quarters, tennis sets, hourly crypto)
+#   - Broad: 3 days allows sports/political events while maintaining velocity
 #   - Prevents capital lock-up in distant markets (30+ days)
-MM_MAX_DAYS_UNTIL_SETTLEMENT: Final[int] = 3  # 3 days max
+MM_MAX_DAYS_UNTIL_SETTLEMENT: Final[float] = 0.04 if IS_SCALPING_MODE else 3.0
 
 # Preferred maximum time (hours) - prioritize ultra-short markets
 # INSTITUTIONAL STANDARD: 24 hours preferred
@@ -830,9 +878,11 @@ MM_SETTLEMENT_TIME_WEIGHT: Final[float] = 2.0
 # INSTITUTIONAL STANDARD: Auto-refresh every 24 hours
 DYNAMIC_TAG_REFRESH_HOURS: Final[int] = 24  # Refresh tags daily
 DYNAMIC_TAG_DISCOVERY_LIMIT: Final[int] = 10  # Top 10 tags by volume
-DYNAMIC_TAG_MIN_MARKETS: Final[int] = 5  # Minimum active markets per tag
-DYNAMIC_TAG_MIN_VOLUME: Final[float] = 10000.0  # $10k daily volume minimum
-DYNAMIC_TAG_MAX_SPREAD: Final[float] = 0.03  # 3% max spread for tag inclusion
+# SCALPING MODE: Aggressive thresholds for small-balance, high-frequency trading
+# BROAD MODE: Conservative institutional thresholds
+DYNAMIC_TAG_MIN_MARKETS: Final[int] = 1 if IS_SCALPING_MODE else 5  # Scalping: 1 market, Broad: 5 markets
+DYNAMIC_TAG_MIN_VOLUME: Final[float] = 500.0 if IS_SCALPING_MODE else 10000.0  # Scalping: $500, Broad: $10k
+DYNAMIC_TAG_MAX_SPREAD: Final[float] = 0.05 if IS_SCALPING_MODE else 0.03  # Scalping: 5%, Broad: 3%
 
 # Maximum number of markets to make simultaneously
 # DEPRECATED: Use MM_MAX_MARKETS for capital allocation limit (5 markets)
@@ -1137,7 +1187,9 @@ MM_QUOTE_UPDATE_INTERVAL: Final[float] = 0.5  # 2026 Institutional Gold: 500ms q
 #   - Shorter TTL = higher cancellation rate but lower pick-off risk
 # Previous: 45s (2025 standard), 60s (legacy conservative setting)
 # Note: Requires 10 req/sec capacity (1 cancel + 1 replace per 2.5 quotes)
-MM_ORDER_TTL: Final[int] = 25  # 2026 Institutional Gold: 25 second order TTL
+# SCALPING MODE: 15 seconds (minimize pick-off risk in fast markets)
+# BROAD MODE: 25 seconds (standard institutional TTL)
+MM_ORDER_TTL: Final[int] = 15 if IS_SCALPING_MODE else 25  # Scalping: 15s, Broad: 25s
 
 # Minimum time between order placements (LEGACY - migrated to token-bucket)
 # INSTITUTIONAL UPGRADE: Replaced with TokenBucketRateLimiter (2026 Gold Standard)
