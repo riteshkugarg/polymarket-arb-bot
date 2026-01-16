@@ -63,8 +63,10 @@ class MarketBlacklistManager:
             custom_keywords: Additional blacklist keywords (optional)
             max_days_until_settlement: Maximum days until settlement (default: 365)
         """
-        # Merge hard blacklist with custom keywords
-        self.blacklist_keywords = set(HARD_BLACKLIST_KEYWORDS)
+        # Merge hard blacklist with custom keywords - normalize ALL to lowercase
+        # (Even though HARD_BLACKLIST_KEYWORDS are already lowercase, this ensures
+        # consistency and prevents manual errors if the constant is edited)
+        self.blacklist_keywords = {k.lower() for k in HARD_BLACKLIST_KEYWORDS}
         if custom_keywords:
             self.blacklist_keywords.update([k.lower() for k in custom_keywords])
         
@@ -128,18 +130,24 @@ class MarketBlacklistManager:
         description = market.get('description', '').lower()
         searchable_text = f"{slug} {question} {description}"
         
-        for keyword in self.blacklist_keywords:
-            if keyword in searchable_text:
-                self._total_blacklisted += 1
-                self._blacklist_reasons['keyword'] += 1
-                if log_reason:
-                    logger.debug(
-                        f"[BLACKLIST] {market_id[:8]}... - Keyword match: '{keyword}' | "
-                        f"Question: {question[:50]}..."
-                    )
-                return True
+        # Pythonic keyword search using any() - early exits on first match
+        if any(keyword in searchable_text for keyword in self.blacklist_keywords):
+            self._total_blacklisted += 1
+            self._blacklist_reasons['keyword'] += 1
+            if log_reason:
+                # Find the matching keyword for logging
+                matched_keyword = next(k for k in self.blacklist_keywords if k in searchable_text)
+                logger.debug(
+                    f"[BLACKLIST] {market_id[:8]}... - Keyword match: '{matched_keyword}' | "
+                    f"Question: {question[:50]}..."
+                )
+            return True
         
         # CHECK 3: Temporal guardrails (settlement date >365 days out)
+        # EDGE CASE: Some markets don't have endDate until resolved, or have proxy dates.
+        # Future Enhancement: Add "Minimum Liquidity" check as 4th guardrail -
+        # if market is 6+ months old with <$100 volume, it's likely a zombie regardless
+        # of settlement date. (Deferred pending Polymarket volume threshold guidance)
         end_date_str = market.get('endDate') or market.get('end_date_iso')
         if end_date_str:
             try:
@@ -153,7 +161,8 @@ class MarketBlacklistManager:
                         # Unix timestamp (seconds)
                         end_date = datetime.fromtimestamp(float(end_date_str), tz=timezone.utc)
                 elif isinstance(end_date_str, (int, float)):
-                    # Unix timestamp
+                    # Unix timestamp (seconds)
+                    # SECURITY: OverflowError caught below handles accidental millisecond timestamps
                     end_date = datetime.fromtimestamp(float(end_date_str), tz=timezone.utc)
                 else:
                     # Unparseable format - skip temporal check
