@@ -52,6 +52,7 @@ from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
 from core.market_data_manager import MarketDataManager, FillEvent, MarketSnapshot
 from core.blacklist_manager import MarketBlacklistManager
+from core.tag_manager import DynamicTagManager
 from config.constants import (
     # Budget allocation
     MARKET_MAKING_STRATEGY_CAPITAL,
@@ -70,6 +71,12 @@ from config.constants import (
     MM_PREFER_BINARY_MARKETS,
     MM_MAX_ACTIVE_MARKETS,  # Deprecated, use MM_MAX_MARKETS
     MM_TARGET_TAGS,  # TRADING OPTIMIZATION: Server-side tag filtering
+    
+    # Time-based filtering (capital velocity optimization)
+    MM_MIN_HOURS_UNTIL_SETTLEMENT,
+    MM_MAX_DAYS_UNTIL_SETTLEMENT,
+    MM_PREFERRED_MAX_HOURS,
+    MM_SETTLEMENT_TIME_WEIGHT,
     
     # Position sizing
     MM_BASE_POSITION_SIZE,
@@ -877,6 +884,9 @@ class MarketMakingStrategy(BaseStrategy):
         self._inventory_manager = inventory_manager
         self._risk_controller = risk_controller
         self.blacklist_manager = MarketBlacklistManager()
+        
+        # Dynamic tag discovery (institutional-grade)
+        self.tag_manager = DynamicTagManager()
         
         # Budget tracking - Use dynamic allocation if provided
         allocated_amount = max_capital if max_capital is not None else MARKET_MAKING_STRATEGY_CAPITAL
@@ -1690,12 +1700,15 @@ class MarketMakingStrategy(BaseStrategy):
             # Use POLYMARKET_GAMMA_API_URL from config
             from config.constants import POLYMARKET_GAMMA_API_URL
             
+            # INSTITUTIONAL UPGRADE: Dynamic tag discovery with fallback
+            active_tags = await self.tag_manager.get_active_tags()
+            
             async with aiohttp.ClientSession() as session:
-                if MM_TARGET_TAGS:
+                if active_tags:
                     # SERVER-SIDE TAG FILTERING (Polymarket Best Practice)
-                    logger.info(f"Using server-side tag filtering with {len(MM_TARGET_TAGS)} tags")
+                    logger.info(f"Using server-side tag filtering with {len(active_tags)} tags (dynamic discovery)")
                     
-                    for tag_id in MM_TARGET_TAGS:
+                    for tag_id in active_tags:
                         # Build Gamma API URL with tag_id parameter
                         url = f"{POLYMARKET_GAMMA_API_URL}/markets"
                         params = {
@@ -1742,11 +1755,11 @@ class MarketMakingStrategy(BaseStrategy):
                             unique_markets[market_id] = market
                     
                     all_markets = list(unique_markets.values())
-                    logger.info(f"[SERVER-SIDE FILTERING] Total unique markets: {len(all_markets)} (deduped from {len(MM_TARGET_TAGS)} tags)")
+                    logger.info(f"[SERVER-SIDE FILTERING] Total unique markets: {len(all_markets)} (deduped from {len(active_tags)} tags)")
                     
                 else:
                     # NO TAG FILTERING: Fetch all active markets (fallback)
-                    logger.warning("MM_TARGET_TAGS is empty - fetching ALL active markets (not recommended)")
+                    logger.warning("Active tags list is empty - fetching ALL active markets (not recommended)")
                     next_cursor = None
                     max_pages = 10
                     
@@ -2085,7 +2098,63 @@ class MarketMakingStrategy(BaseStrategy):
             return False
         
         # ═══════════════════════════════════════════════════════════════════════════════
-        # FILTER 3: ACTIVE STATUS & CLOB ENABLEMENT
+        # FILTER 3: TIME-BASED FILTERING (Capital Velocity Optimization)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # INSTITUTIONAL STANDARD: Focus on short-term markets (15min-3 days)
+        # Rationale: Crypto markets settle in 15min-1hr, maximize capital turnover
+        # Reject markets with locked capital beyond MM_MAX_DAYS_UNTIL_SETTLEMENT
+        
+        end_date_iso = market.get('endDateIso')
+        if end_date_iso:
+            try:
+                # Parse end date (supports both naive and timezone-aware formats)
+                if end_date_iso.endswith('Z'):
+                    end_date = datetime.fromisoformat(end_date_iso.replace('Z', '+00:00'))
+                else:
+                    end_date = datetime.fromisoformat(end_date_iso)
+                
+                # Make end_date timezone-naive for comparison if it has timezone
+                if end_date.tzinfo is not None:
+                    end_date = end_date.replace(tzinfo=None)
+                
+                now = datetime.utcnow()
+                hours_until_settlement = (end_date - now).total_seconds() / 3600
+                
+                # Minimum time check (avoid same-minute settlements)
+                if hours_until_settlement < MM_MIN_HOURS_UNTIL_SETTLEMENT:
+                    logger.debug(
+                        f"[TIER-1 REJECT] {market_id}: TIME-BASED - "
+                        f"Settles in {hours_until_settlement:.2f}h (< {MM_MIN_HOURS_UNTIL_SETTLEMENT}h minimum) | "
+                        f"Question: {question[:50]}..."
+                    )
+                    return False
+                
+                # Maximum time check (avoid long-term capital lock-up)
+                max_hours = MM_MAX_DAYS_UNTIL_SETTLEMENT * 24
+                if hours_until_settlement > max_hours:
+                    logger.debug(
+                        f"[TIER-1 REJECT] {market_id}: TIME-BASED - "
+                        f"Settles in {hours_until_settlement / 24:.1f} days (> {MM_MAX_DAYS_UNTIL_SETTLEMENT} days max) | "
+                        f"Question: {question[:50]}..."
+                    )
+                    return False
+                
+                # Log if market passes time filter (for monitoring short-term focus)
+                if hours_until_settlement <= MM_PREFERRED_MAX_HOURS:
+                    logger.debug(
+                        f"[CAPITAL VELOCITY] {market_id}: Settles in {hours_until_settlement:.2f}h "
+                        f"(within {MM_PREFERRED_MAX_HOURS}h preferred window) ✅"
+                    )
+                
+            except (ValueError, AttributeError) as e:
+                logger.debug(
+                    f"[TIER-1 WARN] {market_id}: Cannot parse endDateIso '{end_date_iso}': {e} | "
+                    f"Allowing market (assume valid)"
+                )
+                # Don't reject if we can't parse - let it through
+        
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # FILTER 4: ACTIVE STATUS & CLOB ENABLEMENT
         # ═══════════════════════════════════════════════════════════════════════════════
         
         if market.get('closed', False):
@@ -2101,7 +2170,7 @@ class MarketMakingStrategy(BaseStrategy):
             return False
         
         # ═══════════════════════════════════════════════════════════════════════════════
-        # FILTER 4: DYNAMIC LIQUIDITY THRESHOLD (Tier-1 Standard)
+        # FILTER 5: DYNAMIC LIQUIDITY THRESHOLD (Tier-1 Standard)
         # ═══════════════════════════════════════════════════════════════════════════════
         # Primary: $15,000 liquidity minimum (institutional-grade)
         # Fallback: $5,000 for small accounts (<$100) in Crypto/Politics only

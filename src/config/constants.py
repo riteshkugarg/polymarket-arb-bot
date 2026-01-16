@@ -739,6 +739,61 @@ MM_TARGET_TAGS: Final[List[str]] = [
 #   - Politics tags: Election cycles drive high-volume markets
 #   - These tags consistently have >$10k daily volume and <3% spreads
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TIME-BASED MARKET FILTERING (Institutional Capital Velocity Optimization)
+# ═══════════════════════════════════════════════════════════════════════════════
+# RATIONALE: Crypto markets settle in 15min-1hr (NOT long-term)
+# GOAL: Maximize capital turnover, avoid locking funds in distant settlements
+# INSTITUTIONAL STANDARD: Focus on <24hr markets for highest velocity trading
+#
+# Market Settlement Patterns (Empirical Data):
+#   - Crypto Price: 15min, 30min, 1hr, 4hr, 24hr
+#   - Sports (In-Game): 15min, 30min, end-of-quarter
+#   - Sports (Match): Same-day (2-4 hours)
+#   - Political Events: 1-7 days (elections, debates)
+#
+# Capital Lock-Up Risk:
+#   - 15min market: Capital recycled 96x/day (optimal velocity)
+#   - 1hr market: Capital recycled 24x/day (high velocity)
+#   - 24hr market: Capital recycled 1x/day (acceptable)
+#   - 7day market: Capital locked for week (avoid unless high ROI)
+#   - 30day+ market: Capital opportunity cost too high (reject)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Minimum time until settlement (hours) - avoid same-minute settlements
+# INSTITUTIONAL STANDARD: 15 minutes (0.25 hours)
+# Rationale: Crypto markets often settle in 15min intervals
+MM_MIN_HOURS_UNTIL_SETTLEMENT: Final[float] = 0.25  # 15 minutes
+
+# Maximum time until settlement (days) - avoid long-term capital lock-up
+# INSTITUTIONAL STANDARD: 3 days maximum
+# Rationale:
+#   - Crypto markets typically <24 hours (15min-1hr-4hr-24hr cadence)
+#   - 3 days allows sports/political events while maintaining velocity
+#   - Prevents capital lock-up in distant markets (30+ days)
+MM_MAX_DAYS_UNTIL_SETTLEMENT: Final[int] = 3  # 3 days max
+
+# Preferred maximum time (hours) - prioritize ultra-short markets
+# INSTITUTIONAL STANDARD: 24 hours preferred
+# Rationale:
+#   - Markets <24hr have highest volume and tightest spreads
+#   - Optimal for market making: faster rebate accumulation
+#   - Lower directional risk (less time for adverse moves)
+MM_PREFERRED_MAX_HOURS: Final[int] = 24  # 1 day preferred
+
+# Settlement time scoring weight (higher = stronger preference for short-term)
+# Used in market ranking: score *= (1 + SETTLEMENT_WEIGHT / hours_until_settlement)
+# INSTITUTIONAL STANDARD: 2.0 (2x preference for 1hr vs 2hr markets)
+MM_SETTLEMENT_TIME_WEIGHT: Final[float] = 2.0
+
+# Dynamic tag discovery configuration
+# INSTITUTIONAL STANDARD: Auto-refresh every 24 hours
+DYNAMIC_TAG_REFRESH_HOURS: Final[int] = 24  # Refresh tags daily
+DYNAMIC_TAG_DISCOVERY_LIMIT: Final[int] = 10  # Top 10 tags by volume
+DYNAMIC_TAG_MIN_MARKETS: Final[int] = 5  # Minimum active markets per tag
+DYNAMIC_TAG_MIN_VOLUME: Final[float] = 10000.0  # $10k daily volume minimum
+DYNAMIC_TAG_MAX_SPREAD: Final[float] = 0.03  # 3% max spread for tag inclusion
+
 # Maximum number of markets to make simultaneously
 # DEPRECATED: Use MM_MAX_MARKETS for capital allocation limit (5 markets)
 # This constant (10) is kept for backward compatibility but should be

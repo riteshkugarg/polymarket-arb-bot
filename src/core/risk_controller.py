@@ -97,7 +97,7 @@ class RiskController:
     def __init__(
         self,
         initial_capital: float,
-        max_drawdown_pct: float = 0.02,  # 2% max drawdown
+        max_drawdown_pct: float = 0.05,  # 5% max drawdown
         max_position_size_usd: float = 5000.0,  # $5k per market
         max_total_position_usd: float = 50000.0,  # $50k total
         max_spread_ticks: int = 50,  # 50 ticks = abnormal spread

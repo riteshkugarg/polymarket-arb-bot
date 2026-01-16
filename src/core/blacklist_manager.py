@@ -36,9 +36,11 @@ HARD_BLACKLIST_KEYWORDS = [
     'by-end-of-decade',  # Extremely long-dated
 ]
 
-# TEMPORAL GUARDRAIL: Maximum days until settlement (365 days = 1 year)
+# TEMPORAL GUARDRAIL: Maximum days until settlement (3 days - capital velocity focus)
+# INSTITUTIONAL STANDARD: Focus on short-term markets (15min-3 days)
+# Rationale: Crypto markets settle in 15min-24hr, avoid long-term capital lock-up
 # Uses endDateIso field for precise date filtering (Polymarket recommendation)
-MAX_DAYS_UNTIL_SETTLEMENT = 365
+MAX_DAYS_UNTIL_SETTLEMENT = 3
 
 
 class MarketBlacklistManager:
