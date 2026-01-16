@@ -735,19 +735,28 @@ MM_TARGET_TAGS: Final[List[str]] = [
     # These tags are BACKUP ONLY - not used during normal operation
     # ═══════════════════════════════════════════════════════════════════════════
     
-    # HIGH-VOLUME FALLBACK TAGS (Last known good - Jan 2026)
-    '235',      # Bitcoin - Crypto price predictions
-    '100240',   # NBA Finals - Professional basketball (event-specific)
-    '78',       # Iran - Middle East geopolitics
-    '180',      # Israel - Middle East conflicts
-    '292',      # Glenn Youngkin - US Politics (person-specific)
-    '802',      # Iowa - US Elections/Caucuses
-    '166',      # South Korea - Asian geopolitics
-    '388',      # Netanyahu - Israeli politics (person-specific)
+    # CAPITAL VELOCITY OPTIMIZED FALLBACK (Last validated: Jan 2026)
+    # Note: Polymarket does NOT have 15min-1hr crypto markets like traditional futures
+    # Most markets settle in 1-7 days (elections, sports events, geopolitical outcomes)
+    # Fallback strategy: Prioritize high-volume categories most likely to have <3 day markets
     
-    # NOTE: Event/person-specific tags (NBA Finals, Youngkin, Netanyahu) may expire.
-    # Dynamic discovery automatically replaces these with current high-volume tags.
-    # Fallback tags should be updated quarterly if discovery is consistently failing.
+    '235',      # Bitcoin - Crypto price predictions (long-term, but high volume)
+    '78',       # Iran - Middle East geopolitics (event-driven, faster settlements)
+    '180',      # Israel - Middle East conflicts (news-driven, active markets)
+    '802',      # Iowa - US Elections/Caucuses (event-specific, known settlement dates)
+    '166',      # South Korea - Asian geopolitics (event-driven)
+    
+    # DEPRECATED EVENT-SPECIFIC TAGS (Kept for backward compatibility only):
+    # These may expire but serve as fallback until dynamic discovery updates them
+    # '100240',   # NBA Finals - Professional basketball (EXPIRES post-season)
+    # '292',      # Glenn Youngkin - US Politics (PERSON-SPECIFIC, may lose relevance)
+    # '388',      # Netanyahu - Israeli politics (PERSON-SPECIFIC, may lose relevance)
+    
+    # NOTE: Dynamic discovery will replace this entire list with tags that:
+    # - Have >5 active markets settling <3 days
+    # - Have >$10k daily volume
+    # - Have <3% spreads
+    # This fallback is only used during API outages (~1% of time)
     
     # ADDITIONAL INSTITUTIONAL TAGS (uncomment as needed):
     # '1192',     # Minnesota Vikings - NFL
