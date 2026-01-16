@@ -874,6 +874,7 @@ class MarketMakingStrategy(BaseStrategy):
         # Risk management (AUDIT FIX)
         self._inventory_manager = inventory_manager
         self._risk_controller = risk_controller
+        self.blacklist_manager = MarketBlacklistManager()
         
         # Budget tracking - Use dynamic allocation if provided
         allocated_amount = max_capital if max_capital is not None else MARKET_MAKING_STRATEGY_CAPITAL
@@ -1729,6 +1730,13 @@ class MarketMakingStrategy(BaseStrategy):
                         logger.debug(f"Fetched Gamma API page {page+1}: {len(page_markets)} markets (total: {len(all_markets)})")
             
             logger.debug(f"Total markets fetched from Gamma API: {len(all_markets)}")
+            
+            # PRE-EMPTIVE BLACKLIST FILTERING (before order book analysis)
+            self.blacklist_manager.reset_stats()
+            filtered_markets = [m for m in all_markets if not self.blacklist_manager.is_blacklisted(m)]
+            self.blacklist_manager.log_summary()
+            logger.debug(f"Markets after blacklist filtering: {len(filtered_markets)} (rejected: {len(all_markets) - len(filtered_markets)})")
+            
             # DEBUG: Track rejection reasons
             rejection_stats = {
                 'not_binary': 0,
@@ -1744,7 +1752,7 @@ class MarketMakingStrategy(BaseStrategy):
             
             # Filter for eligible markets with detailed tracking
             eligible = []
-            for m in all_markets:
+            for m in filtered_markets:
                 is_eligible, reason = self._is_market_eligible_debug(m)
                 if is_eligible:
                     eligible.append(m)

@@ -51,6 +51,7 @@ from core.polymarket_client import PolymarketClient
 from core.order_manager import OrderManager
 from core.atomic_depth_aware_executor import AtomicDepthAwareExecutor, ExecutionPhase
 from core.market_data_manager import MarketDataManager, FillEvent
+from core.blacklist_manager import MarketBlacklistManager  # INSTITUTIONAL: Pre-emptive zombie filtering
 from config.constants import (
     PROXY_WALLET_ADDRESS,
     API_TIMEOUT_SEC,
@@ -126,6 +127,9 @@ class ArbitrageStrategy(BaseStrategy):
         
         # Capital allocation - Use dynamic allocation if provided
         self._max_capital = max_capital if max_capital is not None else None
+        
+        # INSTITUTIONAL: Pre-emptive zombie market filtering
+        self.blacklist_manager = MarketBlacklistManager()
         
         # Pass market_data_manager to scanner for cache access
         self.scanner = ArbScanner(
@@ -423,6 +427,28 @@ class ArbitrageStrategy(BaseStrategy):
                     break
             
             logger.debug(f"Fetched {len(all_events)} total events from Gamma API")
+            
+            # INSTITUTIONAL: Pre-emptive blacklist filtering (before outcome analysis)
+            # Reset stats for this scan cycle
+            self.blacklist_manager.reset_stats()
+            
+            # Filter out zombie markets and long-dated contracts
+            filtered_events = [
+                event for event in all_events
+                if not self.blacklist_manager.is_blacklisted(event, log_reason=logger.isEnabledFor(10))  # 10 = DEBUG
+            ]
+            
+            # Log blacklist summary (single line, not per-market)
+            self.blacklist_manager.log_summary()
+            
+            if len(all_events) != len(filtered_events):
+                logger.info(
+                    f"Blacklist filtered: {len(all_events)} → {len(filtered_events)} events "
+                    f"({len(all_events) - len(filtered_events)} removed)"
+                )
+            
+            # Use filtered events for remaining analysis
+            all_events = filtered_events
             
             # DEBUG: Analyze outcome count distribution
             # Note: Events may have 'markets' array, or 'outcomes' in different location
