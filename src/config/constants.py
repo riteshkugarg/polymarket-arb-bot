@@ -618,10 +618,11 @@ REBATE_LOG_FILE: Final[str] = "logs/maker_rebates.jsonl"
 # INSTITUTIONAL STANDARD: 5 markets max for $100 principal
 # Rationale:
 #   - Concentrates capital in highest-quality opportunities
-#   - Each market receives 20% of allocated capital ($80 / 5 = $16 per market)
+#   - OPTIMIZED FOR TRADING: 2 markets = $28 each (meets $5 min order size easily)
+#   - Previous: 5 markets = $11 each (struggled with minimums)
 #   - Prevents over-diversification with small account
-#   - Easier to monitor 5 positions vs 10+
-MM_MAX_MARKETS: Final[int] = 5
+#   - Easier to monitor 2 positions vs 5+
+MM_MAX_MARKETS: Final[int] = 2  # TRADING OPTIMIZATION: Focus capital on 2 best markets
 
 # Volume multiplier for dynamic threshold calculation
 # INSTITUTIONAL STANDARD: 20.0 (position size < 5% of daily volume)
@@ -634,25 +635,25 @@ MM_MAX_MARKETS: Final[int] = 5
 MM_VOLUME_MULTIPLIER: Final[float] = 20.0
 
 # Hard floor volume threshold (absolute minimum)
-# INSTITUTIONAL STANDARD: $1/day minimum (relaxed for Polymarket 2026)
+# TRADING OPTIMIZATION: $500/day minimum for active markets only
 # Rationale:
-#   - Polymarket has lower volume than traditional exchanges
-#   - Many quality binary markets trade $5-50/day
-#   - Still avoids completely dead markets (< $1/day)
-#   - Can be increased to $50 when trading larger size
-#   - Takes precedence when Dynamic_Min_Volume < $1
-MM_HARD_FLOOR_VOLUME: Final[float] = 1.0
+#   - Targets high-frequency Daily/Weekly categories (Crypto, Sports, Pop Culture)
+#   - Avoids long-tail markets (2028 presidential nominations with minimal trading)
+#   - $500/day = real trading activity with tight spreads
+#   - Previous $1/day allowed ghost town markets
+#   - Focuses capital on markets where we can actually earn spreads
+MM_HARD_FLOOR_VOLUME: Final[float] = 500.0  # TRADING OPTIMIZATION: Active markets only
 
 # Minimum liquidity depth within 2% of mid-price (USD)
-# INSTITUTIONAL HFT STANDARD: $20 minimum depth per side (relaxed for Polymarket)
+# TRADING OPTIMIZATION: $500 minimum depth to target ACTIVE markets only
 # Rationale:
-#   - Polymarket has different microstructure than traditional exchanges
-#   - Many binary markets have $50-200 total liquidity
-#   - $20 depth ensures we're not the ONLY liquidity provider
-#   - Prevents quoting in markets with only 1-2 other MMs
-#   - Can be increased to $500 when trading institutional size
+#   - Avoids "ghost town" markets (2028 presidential nominations with 99.8% spreads)
+#   - Targets markets with real trading activity and tighter spreads
+#   - $500 depth = institutional-grade liquidity
+#   - Focuses on Daily/Weekly categories (Crypto, Sports, Pop Culture)
+#   - Previous $20 allowed dead markets through filter
 # Measurement: Sum of bid/ask volume within 2 ticks of best price
-MM_MIN_LIQUIDITY_DEPTH: Final[float] = 20.0
+MM_MIN_LIQUIDITY_DEPTH: Final[float] = 500.0  # TRADING OPTIMIZATION: Active markets only
 
 # Minimum depth (shares) on best bid/ask
 # Per Polymarket Support: "Lower to 5 shares (or even lower) with $50 capital"
@@ -660,9 +661,13 @@ MM_MIN_LIQUIDITY_DEPTH: Final[float] = 20.0
 MM_MIN_DEPTH_SHARES: Final[float] = 5.0
 
 # Maximum spread to consider market liquid enough
-# INSTITUTION-GRADE: 7% max (reduced from 10%)
-# Wider spreads = higher adverse selection risk
-MM_MAX_SPREAD_PERCENT: Final[float] = 0.07  # 7% max spread
+# TRADING OPTIMIZATION: 3% max to avoid gapped markets
+# Rationale:
+#   - Rejects markets with spreads > 3% at filter stage (not after subscription)
+#   - Avoids wasting time subscribing to 99.8% spread markets
+#   - Active markets typically have 0.5%-2% spreads
+#   - Previous 7% allowed too many illiquid markets through
+MM_MAX_SPREAD_PERCENT: Final[float] = 0.03  # 3% max spread (TRADING OPTIMIZATION)
 
 # Prefer binary markets (2 outcomes) for simplicity
 MM_PREFER_BINARY_MARKETS: Final[bool] = True
