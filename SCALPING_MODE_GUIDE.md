@@ -37,11 +37,13 @@ IS_SCALPING_MODE: Final[bool] = True  # Change from False
 
 ## Priority Tags (Whitelisted)
 These tags are checked FIRST in scalping mode:
-- **1005**: Crypto Hourly (Bitcoin/ETH price predictions, 1hr settlement)
-- **1002**: NBA (Quarters, halftime props, rapid settlement)
-- **1007**: Tennis (Sets, games, sub-hour outcomes)
+- **235**: Bitcoin (Crypto price predictions, may include hourly markets)
+- **100240**: NBA Finals (Basketball quarters, halftime props, rapid settlement)
+- **891**: Mixed Martial Arts (UFC/MMA round outcomes, fast settlement)
 
-**Note:** Run `python scripts/discover_tags.py` to verify actual tag IDs on Polymarket.
+**⚠️ IMPORTANT:** These are **actual verified Tag IDs** from Polymarket as of Jan 16, 2026.
+Run `python scripts/discover_15min_markets.py` to verify which tags currently have <1hr markets.
+Run `python scripts/discover_tags.py` to see all available tags.
 
 ## How It Works
 
@@ -156,16 +158,33 @@ IS_SCALPING_MODE: Final[bool] = False
 ```
 
 ## Advanced: Custom Priority Tags
+
+### Step 1: Discover Available Tags
+```bash
+# See all available tags
+python scripts/discover_tags.py
+
+# Find tags with fast-settling markets
+python scripts/discover_15min_markets.py
+```
+
+### Step 2: Update Priority Tags
 Edit `src/config/constants.py`:
 ```python
 SCALPING_PRIORITY_TAGS: Final[List[str]] = [
-    '1005',  # Crypto Hourly
-    '2031',  # Your custom tag
-    '4567',  # Another fast-settling tag
+    '235',    # Bitcoin (verified)
+    '100240', # NBA Finals (verified)
+    '891',    # Mixed Martial Arts (verified)
+    # Add your discovered tags:
+    '802',    # Iowa (if has fast markets)
+    '180',    # Israel (if has fast markets)
 ]
 ```
 
-Run `python scripts/discover_tags.py` to find your ideal tags.
+**Tip:** Focus on tags discovered by `discover_15min_markets.py` with:
+- High market count in <1hr bucket
+- Active hourly or quarter-based markets
+- Sports/crypto categories with frequent settlements
 
 ## Performance Expectations
 

@@ -116,31 +116,19 @@ IS_SCALPING_MODE: Final[bool] = os.getenv('SCALPING_MODE', 'false').lower() == '
 
 # Scalping Mode Whitelist: High-priority tag IDs for fast-settling markets
 # These tags are checked FIRST before general discovery
-# Tag 1005: Crypto Hourly (Bitcoin/ETH price predictions, 1hr settlement)
-# Tag 1002: NBA (Quarters, halftime props, rapid settlement)
-# Tag 1007: Tennis (Sets, games, sub-hour outcomes)
-# Note: Actual tag IDs may vary - run scripts/discover_tags.py to verify
+# VERIFIED TAG IDs (from scripts/discover_tags.py - Jan 16, 2026):
+# Tag 235: Bitcoin (crypto price predictions, may include hourly markets)
+# Tag 100240: NBA Finals (NBA basketball, includes rapid-settling props)
+# Tag 891: Mixed Martial Arts (UFC/MMA, includes round-by-round markets)
+# NOTE: Run scripts/discover_15min_markets.py to verify which tags have <1hr markets
 SCALPING_PRIORITY_TAGS: Final[List[str]] = [
-    '1005',  # Crypto Hourly - Bitcoin/ETH price movements
-    '1002',  # NBA - Quarters, halftime, rapid props
-    '1007',  # Tennis - Sets, games, sub-hour markets
+    '235',     # Bitcoin - Crypto price predictions (check for hourly markets)
+    '100240',  # NBA Finals - Basketball (quarters, halftime, rapid props)
+    '891',     # Mixed Martial Arts - UFC/MMA (round outcomes, fast settlement)
 ]
 
 # Note: Set environment variable SCALPING_MODE=true to enable
 # Or manually set IS_SCALPING_MODE = True in this file
-
-# Scalping Mode Whitelist: High-priority tag IDs for fast-settling markets
-# Tag 1005: Crypto Hourly (Bitcoin/ETH price predictions, 1hr settlement)
-# Tag 1002: NBA (Quarters, halftime props, rapid settlement)
-# Tag 1007: Tennis (Sets, games, sub-hour outcomes)
-SCALPING_PRIORITY_TAGS: Final[List[str]] = [
-    '1005',  # Crypto Hourly - Bitcoin/ETH price movements
-    '1002',  # NBA - Quarters, halftime, rapid props
-    '1007',  # Tennis - Sets, games, sub-hour markets
-]
-
-# Note: Set environment variable SCALPING_MODE=true to enable
-# Or manually toggle IS_SCALPING_MODE in this file
 MAX_TOTAL_CAPITAL_UTILIZATION: Final[float] = 0.98
 
 
