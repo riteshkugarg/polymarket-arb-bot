@@ -705,18 +705,49 @@ MM_PREFER_BINARY_MARKETS: Final[bool] = True
 # ✅ Empirical testing: Bitcoin (235), NBA (100240), Iran (78), Israel (180)
 # ✅ Polymarket Q27/Q29: Official documentation reference
 # ✅ Polymarket final confirmation: "Best practice" explicitly stated
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# DYNAMIC TAG DISCOVERY (PRIMARY) + STATIC FALLBACK (BACKUP)
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRODUCTION ARCHITECTURE:
+#   PRIMARY:  DynamicTagManager auto-discovers top 10 tags every 24 hours
+#   FALLBACK: MM_TARGET_TAGS used when discovery fails (API errors, circuit breaker)
+#
+# High Availability Design:
+#   1. Tag discovery attempts with exponential backoff (1s → 16s, max 5 retries)
+#   2. If all retries fail → Use MM_TARGET_TAGS as backup
+#   3. Circuit breaker opens after 3 consecutive failures → Use MM_TARGET_TAGS
+#   4. Cache expires (>24hr stale) + discovery unavailable → Use MM_TARGET_TAGS
+#
+# Why Keep Static Tags?
+#   - Graceful degradation: Bot never stops trading on API failures
+#   - Zero downtime: No single point of failure (discovery service resilience)
+#   - Battle-tested: Known-good tags ensure continuity during incidents
+#   - Institutional standard: All HFT systems have static fallbacks
+#
+# Expected Usage: 99% dynamic discovery, 1% fallback (only during API outages)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MM_TARGET_TAGS: Final[List[str]] = [
-    # HIGH-VOLUME TAGS (Institutional-Grade)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FALLBACK TAGS (Used only when dynamic discovery fails)
+    # PRIMARY source is DynamicTagManager (auto-refresh every 24 hours)
+    # These tags are BACKUP ONLY - not used during normal operation
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    # HIGH-VOLUME FALLBACK TAGS (Last known good - Jan 2026)
     '235',      # Bitcoin - Crypto price predictions
-    '100240',   # NBA Finals - Professional basketball
+    '100240',   # NBA Finals - Professional basketball (event-specific)
     '78',       # Iran - Middle East geopolitics
     '180',      # Israel - Middle East conflicts
-    '292',      # Glenn Youngkin - US Politics
+    '292',      # Glenn Youngkin - US Politics (person-specific)
     '802',      # Iowa - US Elections/Caucuses
     '166',      # South Korea - Asian geopolitics
-    '388',      # Netanyahu - Israeli politics
+    '388',      # Netanyahu - Israeli politics (person-specific)
+    
+    # NOTE: Event/person-specific tags (NBA Finals, Youngkin, Netanyahu) may expire.
+    # Dynamic discovery automatically replaces these with current high-volume tags.
+    # Fallback tags should be updated quarterly if discovery is consistently failing.
     
     # ADDITIONAL INSTITUTIONAL TAGS (uncomment as needed):
     # '1192',     # Minnesota Vikings - NFL
